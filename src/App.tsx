@@ -705,6 +705,7 @@ export default function MosesMcQueensOpsPreview() {
     role: "Bartender" as Role,
     pin: "",
   });
+  const [pinResetDrafts, setPinResetDrafts] = useState<Record<number, string>>({});
   const [availabilityForm, setAvailabilityForm] = useState({
     employee: STAFF_SEED[0].name,
     day: "Monday",
@@ -1681,7 +1682,25 @@ export default function MosesMcQueensOpsPreview() {
     setStaffState((prev) => [...prev, { id: Date.now(), name: cleanName, role: staffForm.role, pin: cleanPin, active: true }]);
     setStaffForm({ name: "", role: "Bartender", pin: "" });
   }
+function updateStaffPin(id: number) {
+  if (!canManageStaff) return;
 
+  const cleanPin = digitsOnly(pinResetDrafts[id] || "").slice(0, 4);
+
+  if (cleanPin.length !== 4) {
+    window.alert("PIN must be exactly 4 digits.");
+    return;
+  }
+
+  setStaffState((prev) =>
+    prev.map((member) =>
+      member.id === id ? { ...member, pin: cleanPin } : member
+    )
+  );
+
+  setPinResetDrafts((prev) => ({ ...prev, [id]: "" }));
+  window.alert("Staff PIN updated.");
+}
   function updateStaffRole(id: number, role: Role) {
     if (!canManageStaff) return;
     setStaffState((prev) => prev.map((member) => (member.id === id ? { ...member, role } : member)));
@@ -2652,11 +2671,34 @@ export default function MosesMcQueensOpsPreview() {
                           <p className="text-sm text-stone-500">{member.role}</p>
                           <p className={`text-xs ${member.active ? "text-green-600" : "text-red-600"}`}>{member.active ? "Active" : "Inactive"}</p>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => updateStaffRole(member.id, ROLES[(ROLES.indexOf(member.role) + 1) % ROLES.length])} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Change Role</button>
-                          <button type="button" onClick={() => toggleStaffActive(member.id)} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">{member.active ? "Deactivate" : "Activate"}</button>
-                          <button type="button" onClick={() => removeStaffMember(member.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-                        </div>
+ <div className="space-y-3">
+  <div className="flex flex-wrap gap-2">
+    <button type="button" onClick={() => updateStaffRole(member.id, ROLES[(ROLES.indexOf(member.role) + 1) % ROLES.length])} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Change Role</button>
+    <button type="button" onClick={() => toggleStaffActive(member.id)} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">{member.active ? "Deactivate" : "Activate"}</button>
+    <button type="button" onClick={() => removeStaffMember(member.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
+  </div>
+
+  <div className="rounded-2xl border border-stone-200 bg-white p-3">
+    <p className="mb-2 text-xs font-semibold text-stone-600">Manager PIN Reset</p>
+    <div className="flex flex-col gap-2 sm:flex-row">
+      <input
+        value={pinResetDrafts[member.id] || ""}
+        onChange={(e) =>
+          setPinResetDrafts((prev) => ({
+            ...prev,
+            [member.id]: digitsOnly(e.target.value).slice(0, 4),
+          }))
+        }
+        placeholder="New 4-digit PIN"
+        maxLength={4}
+        className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm"
+      />
+      <button type="button" onClick={() => updateStaffPin(member.id)} className="rounded-2xl bg-stone-900 px-3 py-2 text-xs text-white">
+        Save PIN
+      </button>
+    </div>
+  </div>
+</div>
                       </div>
                     </SmallCard>
                   ))}
