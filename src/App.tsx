@@ -17,7 +17,7 @@ type View =
   | "approvals"
   | "staff";
 
-type WeekKey = "current" | "next";
+type WeekKey = "previous" | "current" | "next";
 
 type StaffMember = {
   id: number;
@@ -139,48 +139,81 @@ const DEFAULT_SHIFT_TEMPLATES: ShiftTemplate[] = [
   { id: 3, name: "Close", time: "5:00 PM - 1:00 AM" },
 ];
 
+const WEEK_DAY_NAMES = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+
+function getMondayStart(date = new Date()) {
+  const current = new Date(date);
+  current.setHours(0, 0, 0, 0);
+  const day = current.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  current.setDate(current.getDate() + diff);
+  return current;
+}
+
+function formatDateLabel(date: Date) {
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function formatFullDateTime(date: Date) {
+  return date.toLocaleString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function buildWeekDates(weekOffset: number): CalendarDate[] {
+  const monday = getMondayStart();
+  monday.setDate(monday.getDate() + weekOffset * 7);
+
+  return WEEK_DAY_NAMES.map((day, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    return {
+      day,
+      dateLabel: formatDateLabel(date),
+    };
+  });
+}
+
 const WEEK_DATE_MAP: Record<WeekKey, CalendarDate[]> = {
-  current: [
-    { day: "Monday", dateLabel: "Apr 13" },
-    { day: "Tuesday", dateLabel: "Apr 14" },
-    { day: "Wednesday", dateLabel: "Apr 15" },
-    { day: "Thursday", dateLabel: "Apr 16" },
-    { day: "Friday", dateLabel: "Apr 17" },
-    { day: "Saturday", dateLabel: "Apr 18" },
-    { day: "Sunday", dateLabel: "Apr 19" },
-  ],
-  next: [
-    { day: "Monday", dateLabel: "Apr 20" },
-    { day: "Tuesday", dateLabel: "Apr 21" },
-    { day: "Wednesday", dateLabel: "Apr 22" },
-    { day: "Thursday", dateLabel: "Apr 23" },
-    { day: "Friday", dateLabel: "Apr 24" },
-    { day: "Saturday", dateLabel: "Apr 25" },
-    { day: "Sunday", dateLabel: "Apr 26" },
-  ],
+  previous: buildWeekDates(-1),
+  current: buildWeekDates(0),
+  next: buildWeekDates(1),
 };
 
 const SHIFT_SEED: ShiftRow[] = [
   {
     id: 101,
-    day: "Monday",
-    dateLabel: "Apr 13",
+    day: WEEK_DATE_MAP.current[0].day,
+    dateLabel: WEEK_DATE_MAP.current[0].dateLabel,
     shift: "Open",
     time: "9:00 AM - 5:00 PM",
     employee: "Jay",
   },
   {
     id: 102,
-    day: "Tuesday",
-    dateLabel: "Apr 14",
+    day: WEEK_DATE_MAP.current[1].day,
+    dateLabel: WEEK_DATE_MAP.current[1].dateLabel,
     shift: "Close",
     time: "5:00 PM - 1:00 AM",
     employee: "Dawn",
   },
   {
     id: 103,
-    day: "Friday",
-    dateLabel: "Apr 17",
+    day: WEEK_DATE_MAP.current[4].day,
+    dateLabel: WEEK_DATE_MAP.current[4].dateLabel,
     shift: "Mid",
     time: "12:00 PM - 8:00 PM",
     employee: "Chris",
@@ -638,6 +671,7 @@ export default function MosesMcQueensOpsPreview() {
   const [showLogin, setShowLogin] = useState(false);
   const [pin, setPin] = useState("");
   const [loginError, setLoginError] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
   const [staffState, setStaffState] = useState<StaffMember[]>(() =>
     loadStoredState(STORAGE_KEYS.staff, STAFF_SEED)
@@ -705,7 +739,6 @@ export default function MosesMcQueensOpsPreview() {
     role: "Bartender" as Role,
     pin: "",
   });
-  const [pinResetDrafts, setPinResetDrafts] = useState<Record<number, string>>({});
   const [availabilityForm, setAvailabilityForm] = useState({
     employee: STAFF_SEED[0].name,
     day: "Monday",
@@ -729,6 +762,11 @@ export default function MosesMcQueensOpsPreview() {
   const [activeShift, setActiveShift] = useState<string | null>(null);
   const [showShiftSelector, setShowShiftSelector] = useState(false);
   const [missedTaskDraft, setMissedTaskDraft] = useState<MissedTaskDraft>({ itemId: null, note: "" });
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     saveStoredState(STORAGE_KEYS.staff, staffState);
@@ -832,7 +870,7 @@ export default function MosesMcQueensOpsPreview() {
       } catch {
         setCloudStatus("Cloud load failed — using current local data");
       } finally {
-        if (!isAutoRefresh) setCloudBusy(false);
+        setCloudBusy(false);
       }
     }
 
@@ -947,7 +985,10 @@ export default function MosesMcQueensOpsPreview() {
     };
   }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
 
-  const allScheduleDates = useMemo(() => [...WEEK_DATE_MAP.current, ...WEEK_DATE_MAP.next], []);
+  const allScheduleDates = useMemo(
+    () => [...WEEK_DATE_MAP.previous, ...WEEK_DATE_MAP.current, ...WEEK_DATE_MAP.next],
+    []
+  );
   const visibleScheduleDays = useMemo(() => WEEK_DATE_MAP[calendarWeek], [calendarWeek]);
 
   const userRole = currentUser?.role;
@@ -959,14 +1000,19 @@ export default function MosesMcQueensOpsPreview() {
 
   const visibleScheduleSource = currentUser && !isLeadership ? publishedSchedule : scheduleState;
 
+  const todayDateLabel = useMemo(() => formatDateLabel(now), [now]);
+  const todayDayName = useMemo(() => now.toLocaleDateString("en-US", { weekday: "long" }), [now]);
+
   const todayDetectedShift = useMemo(() => {
     if (!currentUser || isLeadership) return null;
-    const todayLabel = "Apr 18";
     const todayShift = publishedSchedule.find(
-      (shift) => shift.employee === currentUser.name && shift.dateLabel === todayLabel
+      (shift) =>
+        shift.employee === currentUser.name &&
+        shift.dateLabel === todayDateLabel &&
+        shift.day === todayDayName
     );
     return todayShift?.shift || null;
-  }, [currentUser, isLeadership, publishedSchedule]);
+  }, [currentUser, isLeadership, publishedSchedule, todayDateLabel, todayDayName]);
 
   useEffect(() => {
     if (!currentUser || isLeadership) return;
@@ -1682,25 +1728,7 @@ export default function MosesMcQueensOpsPreview() {
     setStaffState((prev) => [...prev, { id: Date.now(), name: cleanName, role: staffForm.role, pin: cleanPin, active: true }]);
     setStaffForm({ name: "", role: "Bartender", pin: "" });
   }
-function updateStaffPin(id: number) {
-  if (!canManageStaff) return;
 
-  const cleanPin = digitsOnly(pinResetDrafts[id] || "").slice(0, 4);
-
-  if (cleanPin.length !== 4) {
-    window.alert("PIN must be exactly 4 digits.");
-    return;
-  }
-
-  setStaffState((prev) =>
-    prev.map((member) =>
-      member.id === id ? { ...member, pin: cleanPin } : member
-    )
-  );
-
-  setPinResetDrafts((prev) => ({ ...prev, [id]: "" }));
-  window.alert("Staff PIN updated.");
-}
   function updateStaffRole(id: number, role: Role) {
     if (!canManageStaff) return;
     setStaffState((prev) => prev.map((member) => (member.id === id ? { ...member, role } : member)));
@@ -1869,6 +1897,8 @@ function updateStaffPin(id: number) {
           <div>
             <h1 className="text-2xl font-bold">MosesMcQueens Ops</h1>
             <p className="text-sm text-stone-500">Stable restore point build.</p>
+            <p className="mt-1 text-xs font-medium text-stone-500">{formatFullDateTime(now)}</p>
+            <p className="mt-1 text-[11px] text-stone-400">Today: {todayDayName}, {todayDateLabel}</p>
             <div className="mt-3 flex flex-wrap gap-2">
               <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-700">
                 {cloudConfig.mode === "cloud" ? "Cloud Save On" : "Local Save On"}
@@ -2130,7 +2160,7 @@ function updateStaffPin(id: number) {
                       <p className="text-sm text-stone-500">Active Shift</p>
                       <p className="font-semibold">{activeShift}</p>
                       {todayDetectedShift ? (
-                        <p className="mt-1 text-xs text-stone-500">Auto-detected from today&apos;s published schedule</p>
+                        <p className="mt-1 text-xs text-stone-500">Auto-detected from today&apos;s published schedule: {todayDayName}, {todayDateLabel}</p>
                       ) : (
                         <p className="mt-1 text-xs text-stone-500">Manually selected</p>
                       )}
@@ -2199,6 +2229,7 @@ function updateStaffPin(id: number) {
 
                   <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                      <TabButton label="Previous Week" active={calendarWeek === "previous"} onClick={() => setCalendarWeek("previous")} />
                       <TabButton label="Current Week" active={calendarWeek === "current"} onClick={() => setCalendarWeek("current")} />
                       <TabButton label="Next Week" active={calendarWeek === "next"} onClick={() => setCalendarWeek("next")} />
                     </div>
@@ -2671,34 +2702,11 @@ function updateStaffPin(id: number) {
                           <p className="text-sm text-stone-500">{member.role}</p>
                           <p className={`text-xs ${member.active ? "text-green-600" : "text-red-600"}`}>{member.active ? "Active" : "Inactive"}</p>
                         </div>
- <div className="space-y-3">
-  <div className="flex flex-wrap gap-2">
-    <button type="button" onClick={() => updateStaffRole(member.id, ROLES[(ROLES.indexOf(member.role) + 1) % ROLES.length])} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Change Role</button>
-    <button type="button" onClick={() => toggleStaffActive(member.id)} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">{member.active ? "Deactivate" : "Activate"}</button>
-    <button type="button" onClick={() => removeStaffMember(member.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-  </div>
-
-  <div className="rounded-2xl border border-stone-200 bg-white p-3">
-    <p className="mb-2 text-xs font-semibold text-stone-600">Manager PIN Reset</p>
-    <div className="flex flex-col gap-2 sm:flex-row">
-      <input
-        value={pinResetDrafts[member.id] || ""}
-        onChange={(e) =>
-          setPinResetDrafts((prev) => ({
-            ...prev,
-            [member.id]: digitsOnly(e.target.value).slice(0, 4),
-          }))
-        }
-        placeholder="New 4-digit PIN"
-        maxLength={4}
-        className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm"
-      />
-      <button type="button" onClick={() => updateStaffPin(member.id)} className="rounded-2xl bg-stone-900 px-3 py-2 text-xs text-white">
-        Save PIN
-      </button>
-    </div>
-  </div>
-</div>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => updateStaffRole(member.id, ROLES[(ROLES.indexOf(member.role) + 1) % ROLES.length])} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Change Role</button>
+                          <button type="button" onClick={() => toggleStaffActive(member.id)} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">{member.active ? "Deactivate" : "Activate"}</button>
+                          <button type="button" onClick={() => removeStaffMember(member.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
+                        </div>
                       </div>
                     </SmallCard>
                   ))}
