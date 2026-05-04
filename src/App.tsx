@@ -627,8 +627,13 @@ function getRequestOffIssue(
 
 function AppCard({ title, children }: { title?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-      {title ? <h2 className="mb-4 text-lg font-semibold text-stone-900">{title}</h2> : null}
+    <div className="rounded-[2rem] border border-stone-200/80 bg-white/95 p-5 shadow-[0_18px_50px_rgba(28,25,23,0.09)] backdrop-blur transition hover:shadow-[0_24px_70px_rgba(28,25,23,0.12)]">
+      {title ? (
+        <div className="mb-4 flex items-center justify-between gap-3 border-b border-stone-100 pb-3">
+          <h2 className="text-lg font-black tracking-tight text-stone-950">{title}</h2>
+          <div className="h-2 w-2 rounded-full bg-amber-400" />
+        </div>
+      ) : null}
       {children}
     </div>
   );
@@ -636,7 +641,7 @@ function AppCard({ title, children }: { title?: string; children: React.ReactNod
 
 function SmallCard({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`rounded-2xl border border-stone-200 bg-stone-50 p-3 ${className}`}>
+    <div className={`rounded-3xl border border-stone-200/80 bg-gradient-to-br from-white via-white to-stone-50 p-3.5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${className}`}>
       {children}
     </div>
   );
@@ -655,8 +660,10 @@ function TabButton({ label, active, onClick }: { label: string; active?: boolean
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
-        active ? "bg-stone-900 text-white" : "bg-stone-100 text-stone-700 hover:bg-stone-200"
+      className={`rounded-full px-4 py-2 text-sm font-bold tracking-tight transition-all duration-200 active:scale-95 ${
+        active
+          ? "bg-stone-950 text-white shadow-lg shadow-stone-900/20 ring-1 ring-stone-900"
+          : "bg-white/90 text-stone-700 shadow-sm ring-1 ring-stone-200 hover:-translate-y-0.5 hover:bg-stone-50 hover:text-stone-950 hover:shadow-md"
       }`}
     >
       {label}
@@ -715,6 +722,7 @@ export default function MosesMcQueensOpsPreview() {
   );
   const [cloudBusy, setCloudBusy] = useState(false);
   const [hasLoadedCloud, setHasLoadedCloud] = useState(false);
+  const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
   const autoPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoPullTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isApplyingCloudPullRef = useRef(false);
@@ -975,13 +983,29 @@ export default function MosesMcQueensOpsPreview() {
 
     autoPullTimerRef.current = setInterval(() => {
       void refreshCloudDataNow(true);
-    }, 7000);
+    }, 2500);
 
     return () => {
       if (autoPullTimerRef.current) {
         clearInterval(autoPullTimerRef.current);
         autoPullTimerRef.current = null;
       }
+    };
+  }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
+
+  useEffect(() => {
+    function handleFocusLiveSync() {
+      if (cloudConfig.mode !== "cloud") return;
+      if (!cloudConfig.projectUrl.trim() || !cloudConfig.anonKey.trim()) return;
+      void refreshCloudDataNow(true);
+    }
+
+    window.addEventListener("focus", handleFocusLiveSync);
+    document.addEventListener("visibilitychange", handleFocusLiveSync);
+
+    return () => {
+      window.removeEventListener("focus", handleFocusLiveSync);
+      document.removeEventListener("visibilitychange", handleFocusLiveSync);
     };
   }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
 
@@ -1875,7 +1899,8 @@ export default function MosesMcQueensOpsPreview() {
       setSideworkLog(cloudData.sideworkLog);
       setReviewedMissed(cloudData.reviewedMissed);
       setHasLoadedCloud(true);
-      setCloudStatus(isAutoRefresh ? "Auto-sync checked for updates" : "Cloud data refreshed");
+      setLastLiveSyncAt(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }));
+      setCloudStatus(isAutoRefresh ? "Live sync checked for updates" : "Cloud data refreshed");
       setTimeout(() => {
         isApplyingCloudPullRef.current = false;
       }, 300);
@@ -1891,28 +1916,18 @@ export default function MosesMcQueensOpsPreview() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,#f5efe7_0,#f5f5f4_35%,#e7e5e4_100%)] p-4 text-stone-900 sm:p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <div className="flex flex-col gap-4 rounded-3xl border border-stone-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-4 rounded-[2rem] border border-stone-200/80 bg-white/95 p-5 shadow-[0_20px_60px_rgba(28,25,23,0.10)] backdrop-blur md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-2xl font-bold">MosesMcQueens Ops</h1>
-            <p className="text-sm text-stone-500">Stable restore point build.</p>
+            <div className="mb-2 inline-flex rounded-full bg-stone-950 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-amber-100">Live Ops System</div>
+            <h1 className="text-3xl font-black tracking-tight text-stone-950">MosesMcQueens Ops</h1>
+            <p className="text-sm font-medium text-stone-600">Scheduling, sidework, approvals, staff tools, and cloud sync.</p>
             <p className="mt-1 text-xs font-medium text-stone-500">{formatFullDateTime(now)}</p>
             <p className="mt-1 text-[11px] text-stone-400">Today: {todayDayName}, {todayDateLabel}</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-700">
-                {cloudConfig.mode === "cloud" ? "Cloud Save On" : "Local Save On"}
-              </span>
-              <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-700">
-                Pending approvals: {pendingApprovalCount}
-              </span>
-              <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-700">
-                Active staff: {activeStaffCount}
-              </span>
-            </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2 rounded-3xl bg-stone-50/80 p-2 ring-1 ring-stone-200/80">
             <TabButton label="Dashboard" active={activeView === "dashboard"} onClick={() => setActiveView("dashboard")} />
             <TabButton label="Schedule" active={activeView === "schedule"} onClick={() => setActiveView("schedule")} />
             <TabButton label="Sidework" active={activeView === "sidework"} onClick={() => setActiveView("sidework")} />
@@ -1923,14 +1938,14 @@ export default function MosesMcQueensOpsPreview() {
             {isLeadership ? <TabButton label="Staff" active={activeView === "staff"} onClick={() => setActiveView("staff")} /> : null}
             {currentUser ? (
               <>
-                <span className="ml-1 text-sm text-stone-500">{currentUser.name} ({currentUser.role})</span>
-                <button type="button" onClick={handleLogout} className="rounded-2xl bg-stone-200 px-4 py-2 text-sm text-stone-800">Logout</button>
+                <span className="ml-1 rounded-full bg-stone-100 px-3 py-2 text-sm font-semibold text-stone-700 ring-1 ring-stone-200">{currentUser.name} ({currentUser.role})</span>
+                <button type="button" onClick={handleLogout} className="rounded-full bg-stone-950 px-4 py-2 text-sm font-bold text-white shadow-sm">Logout</button>
               </>
             ) : (
-              <button type="button" onClick={() => setShowLogin(true)} className="rounded-2xl bg-stone-900 px-4 py-2 text-sm text-white">Login</button>
+              <button type="button" onClick={() => setShowLogin(true)} className="rounded-full bg-amber-300 px-4 py-2 text-sm font-bold text-stone-950 shadow-lg shadow-amber-900/20">Login</button>
             )}
-          </div>
         </div>
+      </div>
 
         {showLogin ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -2030,7 +2045,8 @@ export default function MosesMcQueensOpsPreview() {
                       <p className="text-sm text-stone-500">Save mode</p>
                       <p className="text-sm font-medium">{cloudConfig.mode === "cloud" ? "Cloud sync mode" : "Local-only mode"}</p>
                       <p className="mt-1 text-xs text-stone-500">{cloudStatus}{cloudBusy ? "..." : ""}</p>
-                      <p className="mt-1 text-[11px] text-stone-400">Auto-sync checks every 7 seconds. Manual buttons stay as backup.</p>
+                      <p className="mt-1 text-[11px] text-stone-400">Live sync checks every 2.5 seconds. Manual buttons stay as backup.</p>
+                      {lastLiveSyncAt ? <p className="mt-1 text-[11px] text-stone-400">Last live sync: {lastLiveSyncAt}</p> : null}
                     </div>
                     <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${cloudConfig.mode === "cloud" ? "bg-emerald-100 text-emerald-700" : "bg-stone-200 text-stone-700"}`}>
                       {cloudConfig.mode === "cloud" ? "Cloud" : "Local"}
