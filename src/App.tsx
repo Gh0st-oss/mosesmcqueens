@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 type Role =
   | "General Manager"
@@ -723,6 +724,9 @@ export default function MosesMcQueensOpsPreview() {
   const [cloudBusy, setCloudBusy] = useState(false);
   const [hasLoadedCloud, setHasLoadedCloud] = useState(false);
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState("Realtime standby");
+  const realtimeChannelRef = useRef<ReturnType<ReturnType<typeof createClient>["channel"]> | null>(null);
+  const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoPullTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isApplyingCloudPullRef = useRef(false);
@@ -989,6 +993,78 @@ export default function MosesMcQueensOpsPreview() {
       if (autoPullTimerRef.current) {
         clearInterval(autoPullTimerRef.current);
         autoPullTimerRef.current = null;
+      }
+    };
+  }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
+
+  useEffect(() => {
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.unsubscribe();
+      realtimeChannelRef.current = null;
+    }
+
+    if (cloudConfig.mode !== "cloud") {
+      setRealtimeStatus("Realtime off in local mode");
+      return;
+    }
+
+    const projectUrl = normalizeSupabaseUrl(cloudConfig.projectUrl);
+    const anonKey = cloudConfig.anonKey.trim();
+    const workspaceId = (cloudConfig.workspaceId || DEFAULT_CLOUD_CONFIG.workspaceId).trim();
+
+    if (!projectUrl || !anonKey || !workspaceId) {
+      setRealtimeStatus("Realtime waiting for cloud settings");
+      return;
+    }
+
+    const client = createClient(projectUrl, anonKey);
+    const channel = client.channel(`ops-live-${workspaceId}`);
+
+    Object.values(CLOUD_TABLES).forEach((table) => {
+      channel.on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table,
+          filter: `workspace_id=eq.${workspaceId}`,
+        },
+        () => {
+          setRealtimeStatus("Realtime update received");
+          if (realtimeRefreshTimerRef.current) {
+            clearTimeout(realtimeRefreshTimerRef.current);
+          }
+          realtimeRefreshTimerRef.current = setTimeout(() => {
+            void refreshCloudDataNow(true);
+          }, 250);
+        }
+      );
+    });
+
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        setRealtimeStatus("Realtime connected");
+      } else if (status === "CHANNEL_ERROR") {
+        setRealtimeStatus("Realtime needs Supabase table enablement");
+      } else if (status === "TIMED_OUT") {
+        setRealtimeStatus("Realtime timed out — live sync backup active");
+      } else if (status === "CLOSED") {
+        setRealtimeStatus("Realtime closed — live sync backup active");
+      } else {
+        setRealtimeStatus(`Realtime ${status.toLowerCase()}`);
+      }
+    });
+
+    realtimeChannelRef.current = channel;
+
+    return () => {
+      if (realtimeRefreshTimerRef.current) {
+        clearTimeout(realtimeRefreshTimerRef.current);
+        realtimeRefreshTimerRef.current = null;
+      }
+      channel.unsubscribe();
+      if (realtimeChannelRef.current === channel) {
+        realtimeChannelRef.current = null;
       }
     };
   }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
@@ -2045,7 +2121,8 @@ export default function MosesMcQueensOpsPreview() {
                       <p className="text-sm text-stone-500">Save mode</p>
                       <p className="text-sm font-medium">{cloudConfig.mode === "cloud" ? "Cloud sync mode" : "Local-only mode"}</p>
                       <p className="mt-1 text-xs text-stone-500">{cloudStatus}{cloudBusy ? "..." : ""}</p>
-                      <p className="mt-1 text-[11px] text-stone-400">Live sync checks every 2.5 seconds. Manual buttons stay as backup.</p>
+                      <p className="mt-1 text-[11px] text-stone-400">Realtime listens instantly. Live sync backup checks every 2.5 seconds.</p>
+                      <p className="mt-1 text-[11px] text-stone-400">{realtimeStatus}</p>
                       {lastLiveSyncAt ? <p className="mt-1 text-[11px] text-stone-400">Last live sync: {lastLiveSyncAt}</p> : null}
                     </div>
                     <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${cloudConfig.mode === "cloud" ? "bg-emerald-100 text-emerald-700" : "bg-stone-200 text-stone-700"}`}>
