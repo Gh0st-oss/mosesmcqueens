@@ -730,6 +730,8 @@ export default function MosesMcQueensOpsPreview() {
   const autoPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoPullTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isApplyingCloudPullRef = useRef(false);
+  const lastLocalEditAtRef = useRef(0);
+  const LOCAL_EDIT_GRACE_MS = 8000;
 
   const [scheduleForm, setScheduleForm] = useState({
     id: null as number | null,
@@ -889,54 +891,8 @@ export default function MosesMcQueensOpsPreview() {
     void loadCloudData();
   }, [cloudConfig.mode, cloudConfig.projectUrl, cloudConfig.anonKey, cloudConfig.workspaceId]);
 
-  useEffect(() => {
-    async function persistCloudData() {
-      if (cloudConfig.mode !== "cloud") return;
-      if (!cloudConfig.projectUrl.trim() || !cloudConfig.anonKey.trim()) return;
-      if (!hasLoadedCloud) return;
-
-      try {
-        setCloudStatus("Syncing cloud save...");
-        await syncAllCloudData({
-        cloudConfig,
-          workspaceId: cloudConfig.workspaceId.trim() || DEFAULT_CLOUD_CONFIG.workspaceId,
-          staffState,
-          scheduleState,
-          publishedSchedule,
-          publishMeta,
-          sideworkState,
-          sideworkCompletionState,
-          availabilityRequests,
-          requestOffs,
-          tradeRequests,
-          sideworkLog,
-          reviewedMissed,
-        });
-        setCloudStatus("Cloud sync complete");
-      } catch {
-        setCloudStatus("Cloud sync failed — local save still active");
-      }
-    }
-
-    void persistCloudData();
-  }, [
-    cloudConfig.mode,
-    cloudConfig.projectUrl,
-    cloudConfig.anonKey,
-    cloudConfig.workspaceId,
-    hasLoadedCloud,
-    staffState,
-    scheduleState,
-    publishedSchedule,
-    publishMeta,
-    sideworkState,
-    sideworkCompletionState,
-    availabilityRequests,
-    requestOffs,
-    tradeRequests,
-    sideworkLog,
-    reviewedMissed,
-  ]);
+  // Cloud saves are handled by the debounced auto-push effect below.
+  // This prevents cloud pulls from racing against fresh local edits.
 
   useEffect(() => {
     if (cloudConfig.mode !== "cloud") return;
@@ -944,13 +900,15 @@ export default function MosesMcQueensOpsPreview() {
     if (!hasLoadedCloud) return;
     if (isApplyingCloudPullRef.current) return;
 
+    lastLocalEditAtRef.current = Date.now();
+
     if (autoPushTimerRef.current) {
       clearTimeout(autoPushTimerRef.current);
     }
 
     autoPushTimerRef.current = setTimeout(() => {
       void pushCloudDataNow();
-    }, 1500);
+    }, 1200);
 
     return () => {
       if (autoPushTimerRef.current) {
@@ -982,12 +940,9 @@ export default function MosesMcQueensOpsPreview() {
       autoPullTimerRef.current = null;
     }
 
-    if (cloudConfig.mode !== "cloud") return;
-    if (!cloudConfig.projectUrl.trim() || !cloudConfig.anonKey.trim()) return;
-
-    autoPullTimerRef.current = setInterval(() => {
-      void refreshCloudDataNow(true);
-    }, 2500);
+    // No constant polling. Realtime pulls changes when Supabase reports updates.
+    // Manual Refresh Cloud Data remains available as a backup.
+    setCloudStatus((prev) => (cloudConfig.mode === "cloud" ? prev : "Local save active"));
 
     return () => {
       if (autoPullTimerRef.current) {
@@ -1928,6 +1883,11 @@ export default function MosesMcQueensOpsPreview() {
   async function refreshCloudDataNow(isAutoRefresh = false) {
     const workspaceId = (cloudConfig.workspaceId || DEFAULT_CLOUD_CONFIG.workspaceId).trim();
 
+    if (isAutoRefresh && Date.now() - lastLocalEditAtRef.current < LOCAL_EDIT_GRACE_MS) {
+      setCloudStatus("Live sync paused while saving your edit");
+      return;
+    }
+
     if (cloudConfig.mode !== "cloud") {
       setCloudStatus("Switch to cloud mode before refreshing");
       window.alert("Switch to cloud mode before refreshing cloud data.");
@@ -2121,7 +2081,7 @@ export default function MosesMcQueensOpsPreview() {
                       <p className="text-sm text-stone-500">Save mode</p>
                       <p className="text-sm font-medium">{cloudConfig.mode === "cloud" ? "Cloud sync mode" : "Local-only mode"}</p>
                       <p className="mt-1 text-xs text-stone-500">{cloudStatus}{cloudBusy ? "..." : ""}</p>
-                      <p className="mt-1 text-[11px] text-stone-400">Realtime listens instantly. Live sync backup checks every 2.5 seconds.</p>
+                      <p className="mt-1 text-[11px] text-stone-400">Event sync is on: edits push after 1.2s, realtime pulls updates to other devices. Manual buttons stay as backup.</p>
                       <p className="mt-1 text-[11px] text-stone-400">{realtimeStatus}</p>
                       {lastLiveSyncAt ? <p className="mt-1 text-[11px] text-stone-400">Last live sync: {lastLiveSyncAt}</p> : null}
                     </div>
