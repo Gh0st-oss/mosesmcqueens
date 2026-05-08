@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 type Role =
   | "General Manager"
   | "Manager"
+  | "Lead"
   | "Bartender"
   | "Bar Back"
   | "Back of House";
@@ -32,6 +33,7 @@ type ShiftTemplate = {
   id: number;
   name: string;
   time: string;
+  sideworkWindow: "Open" | "Mid" | "Close";
 };
 
 type ShiftRow = {
@@ -41,6 +43,7 @@ type ShiftRow = {
   shift: string;
   time: string;
   employee: string;
+  sideworkWindow?: "Open" | "Mid" | "Close";
 };
 
 type SideworkItem = {
@@ -123,6 +126,7 @@ type PublishMeta = {
 const ROLES: Role[] = [
   "General Manager",
   "Manager",
+  "Lead",
   "Bartender",
   "Bar Back",
   "Back of House",
@@ -135,9 +139,9 @@ const STAFF_SEED: StaffMember[] = [
 ];
 
 const DEFAULT_SHIFT_TEMPLATES: ShiftTemplate[] = [
-  { id: 1, name: "Open", time: "9:00 AM - 5:00 PM" },
-  { id: 2, name: "Mid", time: "12:00 PM - 8:00 PM" },
-  { id: 3, name: "Close", time: "5:00 PM - 1:00 AM" },
+  { id: 1, name: "Open", time: "9:00 AM - 5:00 PM", sideworkWindow: "Open" },
+  { id: 2, name: "Mid", time: "12:00 PM - 8:00 PM", sideworkWindow: "Mid" },
+  { id: 3, name: "Close", time: "5:00 PM - 1:00 AM", sideworkWindow: "Close" },
 ];
 
 const WEEK_DAY_NAMES = [
@@ -174,6 +178,86 @@ function formatFullDateTime(date: Date) {
   });
 }
 
+function getCurrentPayPeriod(date = new Date()) {
+  const anchorPayday = new Date("2026-05-08T00:00:00");
+  const current = new Date(date);
+  current.setHours(0, 0, 0, 0);
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysSinceAnchor = Math.floor((current.getTime() - anchorPayday.getTime()) / msPerDay);
+  const periodsSinceAnchor = Math.floor(daysSinceAnchor / 14);
+
+  const start = new Date(anchorPayday);
+  start.setDate(anchorPayday.getDate() + periodsSinceAnchor * 14);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(start.getDate() + 13);
+  end.setHours(23, 59, 59, 999);
+
+  const nextPayday = new Date(start);
+  nextPayday.setDate(start.getDate() + 14);
+  nextPayday.setHours(0, 0, 0, 0);
+
+  return { start, end, nextPayday };
+}
+
+function formatPayPeriodLabel(start: Date, end: Date) {
+  const format = (date: Date) => date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return `${format(start)} - ${format(end)}`;
+}
+
+function isDateLabelInRange(dateLabel: string, start: Date, end: Date) {
+  const year = start.getFullYear();
+  const parsed = new Date(`${dateLabel}, ${year}`);
+  if (Number.isNaN(parsed.getTime())) return false;
+
+  parsed.setHours(12, 0, 0, 0);
+  return parsed >= start && parsed <= end;
+}
+
+function parseShiftTimeRange(time: string) {
+  const parts = time.split("-").map((part) => part.trim());
+  if (parts.length !== 2) return null;
+
+  const parseTime = (value: string) => {
+    const match = value.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
+    if (!match) return null;
+
+    let hours = Number(match[1]);
+    const minutes = Number(match[2] || 0);
+    const meridiem = match[3].toUpperCase();
+
+    if (meridiem === "PM" && hours !== 12) hours += 12;
+    if (meridiem === "AM" && hours === 12) hours = 0;
+
+    return hours + minutes / 60;
+  };
+
+  const start = parseTime(parts[0]);
+  let end = parseTime(parts[1]);
+
+  if (start === null || end === null) return null;
+  if (end <= start) end += 24;
+
+  return { start, end };
+}
+
+function shiftsOverlap(firstTime: string, secondTime: string) {
+  const first = parseShiftTimeRange(firstTime);
+  const second = parseShiftTimeRange(secondTime);
+  if (!first || !second) return false;
+
+  return first.start < second.end && second.start < first.end;
+}
+
+function calculateShiftHours(time: string) {
+  const range = parseShiftTimeRange(time);
+  if (!range) return 0;
+
+  return Math.round((range.end - range.start) * 100) / 100;
+}
+
 function buildWeekDates(weekOffset: number): CalendarDate[] {
   const monday = getMondayStart();
   monday.setDate(monday.getDate() + weekOffset * 7);
@@ -202,6 +286,7 @@ const SHIFT_SEED: ShiftRow[] = [
     shift: "Open",
     time: "9:00 AM - 5:00 PM",
     employee: "Jay",
+    sideworkWindow: "Open",
   },
   {
     id: 102,
@@ -210,6 +295,7 @@ const SHIFT_SEED: ShiftRow[] = [
     shift: "Close",
     time: "5:00 PM - 1:00 AM",
     employee: "Dawn",
+    sideworkWindow: "Close",
   },
   {
     id: 103,
@@ -218,6 +304,7 @@ const SHIFT_SEED: ShiftRow[] = [
     shift: "Mid",
     time: "12:00 PM - 8:00 PM",
     employee: "Chris",
+    sideworkWindow: "Mid",
   },
 ];
 
@@ -239,6 +326,16 @@ const INITIAL_SIDEWORK: SideworkState = {
       team: "Leadership",
       assignedTo: "Manager",
       shiftWindow: "Mid",
+      active: true,
+    },
+  ],
+  Lead: [
+    {
+      id: 7,
+      task: "Check shift handoff and support team",
+      team: "Leadership",
+      assignedTo: "Lead",
+      shiftWindow: "Any",
       active: true,
     },
   ],
@@ -297,6 +394,7 @@ const SIDEWORK_ASSIGN_OPTIONS = [
   "Bartender",
   "Bar Back",
   "Back of House",
+  "Lead",
   "Manager",
   "General Manager",
 ];
@@ -329,16 +427,16 @@ const AVAILABILITY_SEED: AvailabilityRequest[] = [
 const REQUEST_OFF_OPTIONS = ["Open", "Mid", "Close", "All Day"];
 
 const SHIFT_ROLE_MAP: Record<string, Role[]> = {
-  Open: ["Bartender", "Manager", "General Manager"],
-  Mid: ["Bartender", "Bar Back", "Manager"],
-  Close: ["Bartender", "Bar Back", "Manager"],
+  Open: ["Bartender", "Lead", "Manager", "General Manager"],
+  Mid: ["Bartender", "Bar Back", "Back of House", "Lead", "Manager"],
+  Close: ["Bartender", "Bar Back", "Lead", "Manager"],
 };
 
 const REQUEST_OFF_SEED: RequestOff[] = [
   {
     id: 301,
     employee: "Jay",
-    date: "Apr 18",
+    date: WEEK_DATE_MAP.current[4].dateLabel,
     shift: "All Day",
     note: "Family event",
     status: "Pending Manager Approval",
@@ -346,7 +444,7 @@ const REQUEST_OFF_SEED: RequestOff[] = [
   {
     id: 302,
     employee: "Chris",
-    date: "Apr 21",
+    date: WEEK_DATE_MAP.next[0].dateLabel,
     shift: "Open",
     note: "Doctor appointment",
     status: "Approved",
@@ -369,6 +467,7 @@ const STORAGE_KEYS = {
   staff: "ops_preview_staff",
   shifts: "ops_preview_shifts",
   publishedSchedule: "ops_preview_published_schedule",
+  shiftTemplates: "ops_preview_shift_templates",
   publishMeta: "ops_preview_publish_meta",
   sidework: "ops_preview_sidework",
   sideworkCompletion: "ops_preview_sidework_completion",
@@ -656,6 +755,29 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
+function getRoleBadgeClass(role: Role) {
+  switch (role) {
+    case "Bartender":
+      return "bg-sky-100 text-sky-800 ring-sky-200";
+    case "Bar Back":
+      return "bg-emerald-100 text-emerald-800 ring-emerald-200";
+    case "Manager":
+      return "bg-purple-100 text-purple-800 ring-purple-200";
+    case "General Manager":
+      return "bg-amber-100 text-amber-900 ring-amber-200";
+    case "Lead":
+      return "bg-rose-100 text-rose-800 ring-rose-200";
+    case "Back of House":
+      return "bg-orange-100 text-orange-800 ring-orange-200";
+    default:
+      return "bg-stone-100 text-stone-700 ring-stone-200";
+  }
+}
+
+function getEmployeeRole(employee: string, staffState: StaffMember[]): Role | null {
+  return staffState.find((member) => member.name === employee)?.role || null;
+}
+
 function TabButton({ label, active, onClick }: { label: string; active?: boolean; onClick?: () => void }) {
   return (
     <button
@@ -693,7 +815,9 @@ export default function MosesMcQueensOpsPreview() {
   const [publishMeta, setPublishMeta] = useState<PublishMeta>(() =>
     loadStoredState(STORAGE_KEYS.publishMeta, { lastPublishedAt: null })
   );
-  const [shiftTemplates] = useState<ShiftTemplate[]>(DEFAULT_SHIFT_TEMPLATES);
+  const [shiftTemplates, setShiftTemplates] = useState<ShiftTemplate[]>(() =>
+    loadStoredState(STORAGE_KEYS.shiftTemplates, DEFAULT_SHIFT_TEMPLATES)
+  );
   const [sideworkState, setSideworkState] = useState<SideworkState>(() =>
     loadStoredState(STORAGE_KEYS.sidework, INITIAL_SIDEWORK)
   );
@@ -722,6 +846,9 @@ export default function MosesMcQueensOpsPreview() {
     cloudConfig.mode === "cloud" ? "Cloud mode ready" : "Local save active"
   );
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [showCloudPinPrompt, setShowCloudPinPrompt] = useState(false);
+  const [cloudAdminPin, setCloudAdminPin] = useState("");
+  const [cloudPinError, setCloudPinError] = useState(false);
   const [hasLoadedCloud, setHasLoadedCloud] = useState(false);
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState("Realtime standby");
@@ -733,11 +860,21 @@ export default function MosesMcQueensOpsPreview() {
   const lastLocalEditAtRef = useRef(0);
   const LOCAL_EDIT_GRACE_MS = 8000;
 
-  const [scheduleForm, setScheduleForm] = useState({
+  const [overrideWarning, setOverrideWarning] = useState<string | null>(null);
+const [pendingScheduleSave, setPendingScheduleSave] = useState<null | (() => void)>(null);
+
+const [scheduleForm, setScheduleForm] = useState({
     id: null as number | null,
     dateLabel: WEEK_DATE_MAP.current[0].dateLabel,
     shift: DEFAULT_SHIFT_TEMPLATES[0].name,
     employee: STAFF_SEED[0].name,
+    sideworkWindow: DEFAULT_SHIFT_TEMPLATES[0].sideworkWindow,
+  });
+  const [shiftTemplateForm, setShiftTemplateForm] = useState({
+    name: "",
+    startTime: "10:00 AM",
+    endTime: "4:00 PM",
+    sideworkWindow: "Open" as "Open" | "Mid" | "Close",
   });
   const [sideworkForm, setSideworkForm] = useState({
     id: null as number | null,
@@ -794,6 +931,9 @@ export default function MosesMcQueensOpsPreview() {
   useEffect(() => {
     saveStoredState(STORAGE_KEYS.publishMeta, publishMeta);
   }, [publishMeta]);
+  useEffect(() => {
+    saveStoredState(STORAGE_KEYS.shiftTemplates, shiftTemplates);
+  }, [shiftTemplates]);
   useEffect(() => {
     saveStoredState(STORAGE_KEYS.sidework, sideworkState);
   }, [sideworkState]);
@@ -1052,6 +1192,7 @@ export default function MosesMcQueensOpsPreview() {
   const canManageSidework = Boolean(currentUser && isLeadership);
   const canManageApprovals = Boolean(currentUser && isLeadership);
   const canManageStaff = Boolean(currentUser && isLeadership);
+  const canAccessCloudSync = currentUser?.role === "General Manager";
 
   const visibleScheduleSource = currentUser && !isLeadership ? publishedSchedule : scheduleState;
 
@@ -1066,7 +1207,7 @@ export default function MosesMcQueensOpsPreview() {
         shift.dateLabel === todayDateLabel &&
         shift.day === todayDayName
     );
-    return todayShift?.shift || null;
+    return todayShift?.sideworkWindow || todayShift?.shift || null;
   }, [currentUser, isLeadership, publishedSchedule, todayDateLabel, todayDayName]);
 
   useEffect(() => {
@@ -1108,19 +1249,56 @@ export default function MosesMcQueensOpsPreview() {
 
   const myPublishedShifts = useMemo(() => {
     if (!currentUser || isLeadership) return [];
+
     const order = allScheduleDates.map((d) => `${d.day}-${d.dateLabel}`);
+    const todayIndex = order.indexOf(`${todayDayName}-${todayDateLabel}`);
+    const safeTodayIndex = todayIndex >= 0 ? todayIndex : 0;
+
     return [...publishedSchedule]
-      .filter((shift) => shift.employee === currentUser.name)
+      .filter((shift) => {
+        if (shift.employee !== currentUser.name) return false;
+        const shiftIndex = order.indexOf(`${shift.day}-${shift.dateLabel}`);
+        return shiftIndex >= safeTodayIndex;
+      })
       .sort((a, b) => {
         const aIndex = order.indexOf(`${a.day}-${a.dateLabel}`);
         const bIndex = order.indexOf(`${b.day}-${b.dateLabel}`);
         if (aIndex !== bIndex) return aIndex - bIndex;
         return a.shift.localeCompare(b.shift);
       });
-  }, [currentUser, isLeadership, publishedSchedule, allScheduleDates]);
+  }, [currentUser, isLeadership, publishedSchedule, allScheduleDates, todayDayName, todayDateLabel]);
 
   const myNextShift = myPublishedShifts[0] || null;
   const myFollowingShift = myPublishedShifts[1] || null;
+
+  const myWeeklyHours = useMemo(() => {
+    if (!currentUser || isLeadership) return 0;
+    return publishedSchedule
+      .filter(
+        (shift) =>
+          shift.employee === currentUser.name &&
+          visibleScheduleDays.some((day) => day.day === shift.day && day.dateLabel === shift.dateLabel)
+      )
+      .reduce((total, shift) => total + calculateShiftHours(shift.time), 0);
+  }, [currentUser, isLeadership, publishedSchedule, visibleScheduleDays]);
+
+  const currentPayPeriod = useMemo(() => getCurrentPayPeriod(now), [now]);
+
+  const myPayPeriodHours = useMemo(() => {
+    if (!currentUser || isLeadership) return 0;
+    return publishedSchedule
+      .filter(
+        (shift) =>
+          shift.employee === currentUser.name &&
+          isDateLabelInRange(shift.dateLabel, currentPayPeriod.start, currentPayPeriod.end)
+      )
+      .reduce((total, shift) => total + calculateShiftHours(shift.time), 0);
+  }, [currentUser, isLeadership, publishedSchedule, currentPayPeriod]);
+
+  const myPayPeriodLabel = useMemo(
+    () => formatPayPeriodLabel(currentPayPeriod.start, currentPayPeriod.end),
+    [currentPayPeriod]
+  );
 
   const myPublishedThisWeek = useMemo(
     () =>
@@ -1255,6 +1433,7 @@ export default function MosesMcQueensOpsPreview() {
       dateLabel,
       shift: shiftTemplates[0]?.name || "Open",
       employee: staffState.find((member) => member.active)?.name || "Jay",
+      sideworkWindow: shiftTemplates[0]?.sideworkWindow || "Open",
     });
   }
 
@@ -1268,6 +1447,72 @@ export default function MosesMcQueensOpsPreview() {
       shiftWindow: "Open",
       active: true,
     });
+  }
+
+  function saveScheduleRow() {
+    const selectedDate = allScheduleDates.find((d) => d.dateLabel === scheduleForm.dateLabel);
+    if (!selectedDate) return;
+
+    const selectedTemplate = shiftTemplates.find((t) => t.name === scheduleForm.shift);
+    const nextRow: ShiftRow = {
+      id: scheduleForm.id ?? Date.now(),
+      day: selectedDate.day,
+      dateLabel: selectedDate.dateLabel,
+      shift: scheduleForm.shift,
+      time: selectedTemplate?.time || scheduleForm.shift,
+      employee: scheduleForm.employee,
+      sideworkWindow: scheduleForm.sideworkWindow || selectedTemplate?.sideworkWindow || "Open",
+    };
+
+    if (scheduleForm.id) {
+      setScheduleState((prev) => prev.map((row) => (row.id === scheduleForm.id ? nextRow : row)));
+    } else {
+      setScheduleState((prev) => [...prev, nextRow]);
+    }
+
+    resetScheduleForm(selectedDate.dateLabel);
+  }
+
+  function addShiftTemplate(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManageSchedule) return;
+
+    const cleanName = shiftTemplateForm.name.trim();
+    const cleanStart = shiftTemplateForm.startTime.trim();
+    const cleanEnd = shiftTemplateForm.endTime.trim();
+    if (!cleanName || !cleanStart || !cleanEnd) return;
+
+    const nextTemplate: ShiftTemplate = {
+      id: Date.now(),
+      name: cleanName,
+      time: `${cleanStart} - ${cleanEnd}`,
+      sideworkWindow: shiftTemplateForm.sideworkWindow,
+    };
+
+    setShiftTemplates((prev) => [...prev, nextTemplate]);
+    setScheduleForm((prev) => ({ ...prev, shift: nextTemplate.name, sideworkWindow: nextTemplate.sideworkWindow }));
+    setShiftTemplateForm({ name: "", startTime: "10:00 AM", endTime: "4:00 PM", sideworkWindow: "Open" });
+  }
+
+  function deleteShiftTemplate(id: number) {
+    if (!canManageSchedule) return;
+    const targetTemplate = shiftTemplates.find((template) => template.id === id);
+    if (!targetTemplate) return;
+
+    const isDefaultTemplate = DEFAULT_SHIFT_TEMPLATES.some((template) => template.id === id);
+    const isUsedOnSchedule = scheduleState.some((shift) => shift.shift === targetTemplate.name);
+
+    if (isDefaultTemplate) {
+      window.alert("Default Open, Mid, and Close shifts cannot be deleted.");
+      return;
+    }
+
+    if (isUsedOnSchedule) {
+      window.alert("This shift is already assigned on the schedule. Remove those shifts first, then delete the template.");
+      return;
+    }
+
+    setShiftTemplates((prev) => prev.filter((template) => template.id !== id));
   }
 
   function addOrEditScheduleShift(e: React.FormEvent) {
@@ -1284,7 +1529,12 @@ export default function MosesMcQueensOpsPreview() {
       availabilityRequests
     );
     if (availabilityIssue) {
-      window.alert(availabilityIssue);
+      setOverrideWarning(
+        `${availabilityIssue}
+
+Do you want to override this and schedule ${scheduleForm.employee} anyway?`
+      );
+      setPendingScheduleSave(() => () => saveScheduleRow());
       return;
     }
 
@@ -1295,7 +1545,12 @@ export default function MosesMcQueensOpsPreview() {
       requestOffs
     );
     if (requestOffIssue) {
-      window.alert(requestOffIssue);
+      setOverrideWarning(
+        `${requestOffIssue}
+
+Do you want to override this and schedule ${scheduleForm.employee} anyway?`
+      );
+      setPendingScheduleSave(() => () => saveScheduleRow());
       return;
     }
 
@@ -1306,32 +1561,28 @@ export default function MosesMcQueensOpsPreview() {
         row.dateLabel === selectedDate.dateLabel
     );
     if (alreadyHasShift) {
-      window.alert(`${scheduleForm.employee} is already scheduled on ${selectedDate.dateLabel}.`);
+      setOverrideWarning(
+        `${scheduleForm.employee} is already scheduled on ${selectedDate.dateLabel}.
+
+Do you want to override this and add another shift anyway?`
+      );
+      setPendingScheduleSave(() => () => saveScheduleRow());
       return;
     }
 
-    const selectedTemplate = shiftTemplates.find((t) => t.name === scheduleForm.shift);
-    const nextRow: ShiftRow = {
-      id: scheduleForm.id ?? Date.now(),
-      day: selectedDate.day,
-      dateLabel: selectedDate.dateLabel,
-      shift: scheduleForm.shift,
-      time: selectedTemplate?.time || scheduleForm.shift,
-      employee: scheduleForm.employee,
-    };
-
-    if (scheduleForm.id) {
-      setScheduleState((prev) => prev.map((row) => (row.id === scheduleForm.id ? nextRow : row)));
-    } else {
-      setScheduleState((prev) => [...prev, nextRow]);
-    }
-
-    resetScheduleForm(selectedDate.dateLabel);
+    saveScheduleRow();
   }
 
   function startEditShift(row: ShiftRow) {
     if (!canManageSchedule) return;
-    setScheduleForm({ id: row.id, dateLabel: row.dateLabel, shift: row.shift, employee: row.employee });
+    const matchedTemplate = shiftTemplates.find((template) => template.name === row.shift);
+    setScheduleForm({
+      id: row.id,
+      dateLabel: row.dateLabel,
+      shift: row.shift,
+      employee: row.employee,
+      sideworkWindow: row.sideworkWindow || matchedTemplate?.sideworkWindow || "Open",
+    });
     setActiveView("schedule");
   }
 
@@ -2009,7 +2260,106 @@ export default function MosesMcQueensOpsPreview() {
           </div>
         ) : null}
 
-        {showShiftSelector ? (
+        {showCloudPinPrompt ? (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+            <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
+              <h2 className="mb-2 text-lg font-bold text-stone-900">General Manager Approval</h2>
+              <p className="mb-4 text-sm text-stone-600">
+                Enter a General Manager PIN before pushing live cloud data.
+              </p>
+
+              <input
+                value={cloudAdminPin}
+                onChange={(e) => {
+                  setCloudAdminPin(digitsOnly(e.target.value).slice(0, 4));
+                  setCloudPinError(false);
+                }}
+                placeholder="GM PIN"
+                maxLength={4}
+                className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-center text-lg tracking-[0.4em]"
+              />
+
+              {cloudPinError ? (
+                <p className="mt-2 text-sm font-semibold text-red-600">Incorrect General Manager PIN.</p>
+              ) : null}
+
+              <div className="mt-5 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCloudPinPrompt(false);
+                    setCloudAdminPin("");
+                    setCloudPinError(false);
+                  }}
+                  className="flex-1 rounded-2xl bg-stone-200 px-4 py-2 text-stone-800"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const gm = staffState.find(
+                      (member) => member.active && member.role === "General Manager" && member.pin === cloudAdminPin
+                    );
+
+                    if (!gm) {
+                      setCloudPinError(true);
+                      return;
+                    }
+
+                    setShowCloudPinPrompt(false);
+                    setCloudAdminPin("");
+                    setCloudPinError(false);
+                    void pushCloudDataNow();
+                  }}
+                  className="flex-1 rounded-2xl bg-amber-300 px-4 py-2 font-bold text-stone-950"
+                >
+                  Push Data
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {overrideWarning ? (
+  <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+    <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
+      <h2 className="mb-3 text-lg font-bold text-stone-900">Scheduling Warning</h2>
+      <p className="whitespace-pre-line text-sm text-stone-700">{overrideWarning}</p>
+
+      <div className="mt-5 flex gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setOverrideWarning(null);
+            setPendingScheduleSave(null);
+          }}
+          className="flex-1 rounded-2xl bg-stone-200 px-4 py-2 text-stone-800"
+        >
+          Cancel
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            if (pendingScheduleSave) {
+              const savePendingSchedule = pendingScheduleSave;
+              setOverrideWarning(null);
+              setPendingScheduleSave(null);
+              savePendingSchedule();
+            }
+          }}
+          className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-white"
+        >
+          Override
+        </button>
+      </div>
+    </div>
+  </div>
+) : null}
+
+{showShiftSelector ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
             <div className="w-full max-w-sm rounded-3xl border border-stone-200 bg-white p-5 shadow-xl">
               <h2 className="mb-3 text-lg font-semibold text-stone-900">Select Your Shift</h2>
@@ -2043,730 +2393,470 @@ export default function MosesMcQueensOpsPreview() {
 
         {activeView === "dashboard" ? (
           <div className="grid gap-6 lg:grid-cols-3">
-            <AppCard title="Team Snapshot">
-              <div className="space-y-3">
-                <SmallCard><p className="text-sm text-stone-500">Active staff</p><p className="text-2xl font-semibold">{activeStaffCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Draft shifts</p><p className="text-2xl font-semibold">{totalScheduleCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Visible week shifts</p><p className="text-2xl font-semibold">{shiftsThisWeek.length}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Published this week</p><p className="text-2xl font-semibold">{publishedThisWeek.length}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Total sidework tasks</p><p className="text-2xl font-semibold">{sideworkCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Approved availability rules</p><p className="text-2xl font-semibold">{approvedAvailabilityCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Approved request-offs</p><p className="text-2xl font-semibold">{approvedRequestOffCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Pending approvals</p><p className="text-2xl font-semibold">{pendingApprovalCount}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Schedule conflicts</p><p className="text-2xl font-semibold">{scheduleConflictCount}</p></SmallCard>
-              </div>
-            </AppCard>
-
-            <AppCard title="Upcoming Schedule">
-              {sortedSchedule.length ? (
-                <div className="space-y-2">
-                  {sortedSchedule.slice(0, 5).map((shift) => (
-                    <SmallCard key={shift.id}>
-                      <p className="font-medium">{shift.shift} — {shift.employee}</p>
-                      <p className="text-sm text-stone-500">{shift.day}, {shift.dateLabel}</p>
-                      <p className="text-xs text-stone-400">{shift.time}</p>
-                    </SmallCard>
-                  ))}
-                </div>
-              ) : <EmptyState text="No scheduled shifts yet." />}
-            </AppCard>
-
-            <AppCard title="Published Schedule Status">
-              <div className="space-y-3">
-                <SmallCard><p className="text-sm text-stone-500">Last published</p><p className="text-sm font-medium">{publishMeta.lastPublishedAt || "Not published yet"}</p></SmallCard>
-                <SmallCard><p className="text-sm text-stone-500">Staff visibility</p><p className="text-sm font-medium">Staff see the published schedule only.</p></SmallCard>
-                <SmallCard>
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm text-stone-500">Save mode</p>
-                      <p className="text-sm font-medium">{cloudConfig.mode === "cloud" ? "Cloud sync mode" : "Local-only mode"}</p>
-                      <p className="mt-1 text-xs text-stone-500">{cloudStatus}{cloudBusy ? "..." : ""}</p>
-                      <p className="mt-1 text-[11px] text-stone-400">Event sync is on: edits push after 1.2s, realtime pulls updates to other devices. Manual buttons stay as backup.</p>
-                      <p className="mt-1 text-[11px] text-stone-400">{realtimeStatus}</p>
-                      {lastLiveSyncAt ? <p className="mt-1 text-[11px] text-stone-400">Last live sync: {lastLiveSyncAt}</p> : null}
-                    </div>
-                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${cloudConfig.mode === "cloud" ? "bg-emerald-100 text-emerald-700" : "bg-stone-200 text-stone-700"}`}>
-                      {cloudConfig.mode === "cloud" ? "Cloud" : "Local"}
-                    </span>
-                  </div>
-                </SmallCard>
-              </div>
-            </AppCard>
-
-            <AppCard title="Cloud Save Settings">
-              <div className="space-y-3">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={switchToLocalMode}
-                    className={`rounded-2xl px-4 py-2 text-sm font-medium ${cloudConfig.mode === "local" ? "bg-stone-900 text-white" : "bg-stone-200 text-stone-800"}`}
-                  >
-                    Use Local Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCloudConfig((prev) => ({ ...prev, mode: "cloud" }))}
-                    className={`rounded-2xl px-4 py-2 text-sm font-medium ${cloudConfig.mode === "cloud" ? "bg-stone-900 text-white" : "bg-stone-200 text-stone-800"}`}
-                  >
-                    Use Cloud Save
-                  </button>
-                </div>
-
-                <input
-                  value={cloudConfig.projectUrl}
-                  onChange={(e) => setCloudConfig((prev) => ({ ...prev, projectUrl: e.target.value }))}
-                  placeholder="Supabase Project URL"
-                  className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2"
-                />
-                <input
-                  value={cloudConfig.anonKey}
-                  onChange={(e) => setCloudConfig((prev) => ({ ...prev, anonKey: e.target.value }))}
-                  placeholder="Supabase Anon Key"
-                  className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2"
-                />
-                <input
-                  value={cloudConfig.workspaceId}
-                  onChange={(e) => setCloudConfig((prev) => ({ ...prev, workspaceId: e.target.value }))}
-                  placeholder="Workspace ID"
-                  className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2"
-                />
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="relative z-50">
-                  <button
-                    onClick={() => {
-                      saveCloudSettingsNow();
-                    }}
-                    className="rounded-2xl bg-green-600 px-4 py-2 text-sm font-medium text-white"
-                  >
-                    Save Cloud Settings
-                  </button>
-                </div>
-                  <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-600">
-                    Current mode: {cloudConfig.mode === "cloud" ? "Cloud" : "Local"}
-                  </div>
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <button
-                    onClick={() => {
-                      void pushCloudDataNow();
-                    }}
-                    disabled={cloudBusy || cloudConfig.mode !== "cloud"}
-                    className={`w-full rounded-2xl px-4 py-2 text-sm font-medium text-white ${cloudBusy || cloudConfig.mode !== "cloud" ? "cursor-not-allowed bg-stone-300" : "bg-emerald-600"}`}
-                  >
-                    {cloudBusy ? "Working..." : "Push Cloud Data"}
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      void refreshCloudDataNow();
-                    }}
-                    disabled={cloudBusy || cloudConfig.mode !== "cloud"}
-                    className={`w-full rounded-2xl px-4 py-2 text-sm font-medium text-white ${cloudBusy || cloudConfig.mode !== "cloud" ? "cursor-not-allowed bg-stone-300" : "bg-blue-600"}`}
-                  >
-                    {cloudBusy ? "Working..." : "Refresh Cloud Data"}
-                  </button>
-                </div>
-
-                <div className="rounded-2xl border border-stone-200 bg-stone-50 p-3 text-xs text-stone-500">
-                  Create one row per workspace in each Supabase table using <span className="font-semibold">workspace_id</span>, <span className="font-semibold">payload</span> (jsonb), and <span className="font-semibold">updated_at</span> (timestamp). Set <span className="font-semibold">workspace_id</span> as unique for upsert.
-                </div>
-              </div>
-            </AppCard>
-
-            {currentUser && !isLeadership ? (
-              <AppCard title="My Shift Snapshot">
-                <div className="space-y-3">
-                  <SmallCard>
-                    <p className="text-sm text-stone-500">Next shift</p>
-                    {myNextShift ? (
-                      <>
-                        <p className="font-medium">{myNextShift.shift} — {myNextShift.dateLabel}</p>
-                        <p className="text-sm text-stone-500">{myNextShift.time}</p>
-                      </>
-                    ) : (
-                      <p className="text-sm text-stone-400">No shift scheduled</p>
-                    )}
-                  </SmallCard>
-                  <SmallCard>
-                    <p className="text-sm text-stone-500">Following shift</p>
-                    {myFollowingShift ? (
-                      <>
-                        <p className="font-medium">{myFollowingShift.shift} — {myFollowingShift.dateLabel}</p>
-                        <p className="text-sm text-stone-500">{myFollowingShift.time}</p>
-                      </>
-                    ) : (
-                      <p className="text-sm text-stone-400">No additional shift scheduled</p>
-                    )}
-                  </SmallCard>
-                  {!activeShift ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowShiftSelector(true)}
-                      className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm text-white"
-                    >
-                      Start Shift
-                    </button>
-                  ) : (
+            {isLeadership ? (
+              <>
+                <AppCard title="Overview">
+                  <div className="grid gap-3 sm:grid-cols-2">
                     <SmallCard>
-                      <p className="text-sm text-stone-500">Active Shift</p>
-                      <p className="font-semibold">{activeShift}</p>
-                      {todayDetectedShift ? (
-                        <p className="mt-1 text-xs text-stone-500">Auto-detected from today&apos;s published schedule: {todayDayName}, {todayDateLabel}</p>
-                      ) : (
-                        <p className="mt-1 text-xs text-stone-500">Manually selected</p>
-                      )}
-                      <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                        <button
-                          type="button"
-                          onClick={() => setShowShiftSelector(true)}
-                          className="rounded-xl bg-stone-200 px-3 py-1 text-xs text-stone-800"
-                        >
-                          Change Shift
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveShift(null);
-                            setSideworkFilter("All");
-                          }}
-                          className="rounded-xl bg-red-50 px-3 py-1 text-xs text-red-600"
-                        >
-                          End Shift
-                        </button>
-                      </div>
+                      <p className="text-xs text-stone-500">Scheduled shifts</p>
+                      <p className="text-2xl font-black">{totalScheduleCount}</p>
                     </SmallCard>
-                  )}
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Active staff</p>
+                      <p className="text-2xl font-black">{activeStaffCount}</p>
+                    </SmallCard>
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Sidework tasks</p>
+                      <p className="text-2xl font-black">{sideworkCount}</p>
+                    </SmallCard>
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Pending approvals</p>
+                      <p className="text-2xl font-black">{pendingApprovalCount}</p>
+                    </SmallCard>
+                  </div>
+                </AppCard>
+
+                <AppCard title="Schedule Health">
+                  <div className="space-y-3">
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Visible week</p>
+                      <p className="font-black capitalize">{calendarWeek}</p>
+                    </SmallCard>
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Shifts visible</p>
+                      <p className="font-black">{shiftsThisWeek.length}</p>
+                    </SmallCard>
+                    <SmallCard>
+                      <p className="text-xs text-stone-500">Conflict warnings</p>
+                      <p className="font-black">{scheduleConflictCount}</p>
+                    </SmallCard>
+                  </div>
+                </AppCard>
+              </>
+            ) : currentUser ? (
+              <AppCard title="My Hours">
+  <div className="space-y-3">
+    <SmallCard>
+      <p className="text-xs uppercase tracking-wide text-stone-500">This Week</p>
+      <p className="mt-1 text-4xl font-black text-stone-950">{myWeeklyHours}</p>
+      <p className="text-sm text-stone-500">Scheduled hours this week</p>
+    </SmallCard>
+
+    <SmallCard>
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-stone-500">Current Pay Period</p>
+          <p className="mt-1 text-4xl font-black text-stone-950">{myPayPeriodHours}</p>
+          <p className="text-sm text-stone-500">Scheduled pay period hours</p>
+        </div>
+
+        <div className="rounded-2xl bg-stone-100 px-3 py-2 text-right ring-1 ring-stone-200">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-stone-500">Pay Period</p>
+          <p className="text-sm font-bold text-stone-900">{myPayPeriodLabel}</p>
+        </div>
+      </div>
+    </SmallCard>
+  </div>
+</AppCard>
+            ) : (
+              <AppCard title="Staff Dashboard">
+                <p className="text-sm text-stone-600">Login to view your shifts, weekly hours, monthly hours, and sidework progress.</p>
+              </AppCard>
+            )}
+
+            {canAccessCloudSync ? (
+              <AppCard title="Cloud Sync">
+                <div className="space-y-3">
+                  <p className="text-sm font-semibold text-stone-700">{cloudStatus}</p>
+                  <p className="text-xs text-stone-500">{realtimeStatus}</p>
+                  {lastLiveSyncAt ? <p className="text-xs text-stone-400">Last live sync: {lastLiveSyncAt}</p> : null}
+                  <button
+                    type="button"
+                    onClick={() => void refreshCloudDataNow(false)}
+                    disabled={cloudBusy}
+                    className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+                  >
+                    Refresh Cloud Data
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCloudAdminPin("");
+                      setCloudPinError(false);
+                      setShowCloudPinPrompt(true);
+                    }}
+                    disabled={cloudBusy}
+                    className="w-full rounded-2xl bg-amber-300 px-4 py-2 text-sm font-bold text-stone-950 disabled:opacity-50"
+                  >
+                    Push Current Data
+                  </button>
                 </div>
               </AppCard>
             ) : null}
+
+            {!currentUser ? (
+              <AppCard title="Staff Access">
+                <p className="mb-3 text-sm text-stone-600">Login to unlock staff tools, schedules, sidework, requests, and management permissions.</p>
+                <button type="button" onClick={() => setShowLogin(true)} className="rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">Login</button>
+              </AppCard>
+            ) : !isLeadership ? (
+              <AppCard title="My Next Shifts">
+                <div className="space-y-3">
+                  {myNextShift ? (
+                    <SmallCard>
+                      <p className="font-bold">{myNextShift.day}, {myNextShift.dateLabel}</p>
+                      <p className="text-sm text-stone-500">{myNextShift.shift} · {myNextShift.time}</p>
+                    </SmallCard>
+                  ) : (
+                    <EmptyState text="No upcoming published shift found." />
+                  )}
+                  {myFollowingShift ? (
+                    <SmallCard>
+                      <p className="font-bold">Following: {myFollowingShift.day}, {myFollowingShift.dateLabel}</p>
+                      <p className="text-sm text-stone-500">{myFollowingShift.shift} · {myFollowingShift.time}</p>
+                    </SmallCard>
+                  ) : null}
+                </div>
+              </AppCard>
+            ) : (
+              <AppCard title="Manager Tools">
+                <div className="space-y-2">
+                  <button type="button" onClick={() => setActiveView("schedule")} className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-white">Manage Schedule</button>
+                  <button type="button" onClick={() => setActiveView("approvals")} className="w-full rounded-2xl bg-amber-300 px-4 py-2 font-bold text-stone-950">Review Approvals</button>
+                </div>
+              </AppCard>
+            )}
           </div>
         ) : null}
 
         {activeView === "schedule" ? (
-          currentUser ? (
-            canManageSchedule ? (
-              <div className="space-y-6">
-                <AppCard title="Add / Edit Shift">
-                  <form onSubmit={addOrEditScheduleShift} className="grid gap-3 md:grid-cols-4">
-                    <select value={scheduleForm.dateLabel} onChange={(e) => setScheduleForm((prev) => ({ ...prev, dateLabel: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                      {allScheduleDates.map((date) => <option key={date.dateLabel} value={date.dateLabel}>{date.day} - {date.dateLabel}</option>)}
-                    </select>
-                    <select value={scheduleForm.shift} onChange={(e) => setScheduleForm((prev) => ({ ...prev, shift: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                      {shiftTemplates.map((template) => <option key={template.id} value={template.name}>{template.name}</option>)}
-                    </select>
-                    <select value={scheduleForm.employee} onChange={(e) => setScheduleForm((prev) => ({ ...prev, employee: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                      {staffState.filter((member) => member.active).map((member) => <option key={member.id} value={member.name}>{member.name}</option>)}
-                    </select>
-                    <div className="flex gap-2">
-                      <button type="submit" className="flex-1 rounded-2xl bg-stone-900 px-4 py-2 text-white">{scheduleForm.id ? "Update" : "Add"}</button>
-                      {scheduleForm.id ? <button type="button" onClick={() => resetScheduleForm()} className="rounded-2xl bg-stone-200 px-4 py-2 text-stone-800">Clear</button> : null}
-                    </div>
-                  </form>
-                </AppCard>
-
-                <AppCard title="Weekly Schedule">
-                  <div className="mb-4 rounded-2xl border border-stone-200 bg-stone-50 p-3">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-stone-800">Draft schedule editor</p>
-                        <p className="text-xs text-stone-500">Staff cannot see draft changes until you publish.</p>
-                      </div>
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2">
-                        <p className="text-xs text-stone-500">Last published: {publishMeta.lastPublishedAt || "Never"}</p>
-                        <button type="button" onClick={publishSchedule} className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm text-white sm:w-auto">Publish Schedule</button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                      <TabButton label="Previous Week" active={calendarWeek === "previous"} onClick={() => setCalendarWeek("previous")} />
-                      <TabButton label="Current Week" active={calendarWeek === "current"} onClick={() => setCalendarWeek("current")} />
-                      <TabButton label="Next Week" active={calendarWeek === "next"} onClick={() => setCalendarWeek("next")} />
-                    </div>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <button type="button" onClick={copyCurrentToNextWeek} className="w-full rounded-2xl bg-stone-200 px-4 py-2 text-sm text-stone-800 sm:w-auto">Copy Current → Next</button>
-                      <button type="button" onClick={autoScheduleVisibleWeek} className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm text-white sm:w-auto">Auto-Schedule</button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    {visibleScheduleDays.map((day) => {
-                      const dayShifts = scheduleState.filter((row) => row.day === day.day && row.dateLabel === day.dateLabel);
-                      return (
-                        <div key={`${day.day}-${day.dateLabel}`} className="rounded-3xl border border-stone-200 bg-stone-50 p-4 sm:p-5">
-                          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                              <p className="text-base font-semibold text-stone-900">{day.day}</p>
-                              <p className="text-sm text-stone-500">{day.dateLabel}</p>
-                            </div>
-                            <button type="button" onClick={() => clearDay(day)} className="w-full rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-600 sm:w-auto">Clear Day</button>
-                          </div>
-
-                          {dayShifts.length ? (
-                            <div className="space-y-3">
-                              {dayShifts.map((shift) => {
-                                const alert = scheduleAlerts[shift.id];
-                                const hasIssue = Boolean(alert?.availabilityIssue || alert?.requestOffIssue || alert?.doubleBooked);
-                                return (
-                                  <SmallCard key={shift.id} className={hasIssue ? "border-red-200 bg-red-50" : "bg-white"}>
-                                    <div className="space-y-3">
-                                      <div>
-                                        <p className="text-base font-medium text-stone-900">{shift.shift} — {shift.employee}</p>
-                                        <p className="text-sm text-stone-500">{shift.time}</p>
-                                      </div>
-
-                                      {alert?.availabilityIssue ? <p className="rounded-xl bg-white/70 px-3 py-2 text-xs text-red-600">⚠ {alert.availabilityIssue}</p> : null}
-                                      {alert?.requestOffIssue ? <p className="rounded-xl bg-white/70 px-3 py-2 text-xs text-red-600">⚠ {alert.requestOffIssue}</p> : null}
-                                      {alert?.doubleBooked ? <p className="rounded-xl bg-white/70 px-3 py-2 text-xs text-red-600">⚠ Double-booked on this date.</p> : null}
-
-                                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                                        <button type="button" onClick={() => startEditShift(shift)} className="w-full rounded-2xl bg-stone-200 px-3 py-2 text-sm text-stone-800 sm:w-auto">Edit</button>
-                                        <button type="button" onClick={() => duplicateShift(shift)} className="w-full rounded-2xl bg-stone-200 px-3 py-2 text-sm text-stone-800 sm:w-auto">+1 Week</button>
-                                        <button type="button" onClick={() => removeScheduleShift(shift.id)} className="w-full rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-600 sm:w-auto">Delete</button>
-                                      </div>
-                                    </div>
-                                  </SmallCard>
-                                );
-                              })}
-                            </div>
-                          ) : <EmptyState text="No shifts scheduled for this day." />}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </AppCard>
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]">
+            <AppCard title={canManageSchedule ? "Build Schedule" : "Published Schedule"}>
+              <div className="mb-4 flex flex-wrap gap-2">
+                <TabButton label="Previous Week" active={calendarWeek === "previous"} onClick={() => setCalendarWeek("previous")} />
+                <TabButton label="Current Week" active={calendarWeek === "current"} onClick={() => setCalendarWeek("current")} />
+                <TabButton label="Next Week" active={calendarWeek === "next"} onClick={() => setCalendarWeek("next")} />
               </div>
-            ) : (
-              <AppCard title="Published Schedule">
-                <div className="mb-4">
-                  <p className="text-sm text-stone-500">You are viewing the published team schedule.</p>
-                  <p className="text-xs text-stone-400">Last published: {publishMeta.lastPublishedAt || "Not published yet"}</p>
-                </div>
 
-                <div className="mb-4">
-                  <h3 className="mb-2 text-sm font-semibold text-stone-800">My Published Shifts This Week</h3>
-                  <div className="space-y-2">
-                    {myPublishedThisWeek.length ? (
-                      myPublishedThisWeek.map((shift) => (
-                        <SmallCard key={`mine-${shift.id}`}>
-                          <p className="font-medium">{shift.shift} — {shift.dateLabel}</p>
-                          <p className="text-sm text-stone-500">{shift.time}</p>
-                        </SmallCard>
-                      ))
-                    ) : (
-                      <EmptyState text="No personal published shifts this week." />
-                    )}
-                  </div>
-                </div>
+              {canManageSchedule ? (
+                <>
+                  <form onSubmit={addOrEditScheduleShift} className="space-y-3">
+                    <select value={scheduleForm.dateLabel} onChange={(e) => setScheduleForm((prev) => ({ ...prev, dateLabel: e.target.value }))} className="w-full rounded-2xl border border-stone-300 px-3 py-2">
+                      {allScheduleDates.map((day) => <option key={`${day.day}-${day.dateLabel}`} value={day.dateLabel}>{day.day} · {day.dateLabel}</option>)}
+                    </select>
+                    <select
+                      value={scheduleForm.shift}
+                      onChange={(e) => {
+                        const selectedTemplate = shiftTemplates.find((template) => template.name === e.target.value);
+                        setScheduleForm((prev) => ({
+                          ...prev,
+                          shift: e.target.value,
+                          sideworkWindow: selectedTemplate?.sideworkWindow || prev.sideworkWindow,
+                        }));
+                      }}
+                      className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                    >
+                      {shiftTemplates.map((shift) => (
+                        <option key={shift.id} value={shift.name}>{shift.name} · {shift.time} · {shift.sideworkWindow} Sidework</option>
+                      ))}
+                    </select>
+                    <select value={scheduleForm.employee} onChange={(e) => setScheduleForm((prev) => ({ ...prev, employee: e.target.value }))} className="w-full rounded-2xl border border-stone-300 px-3 py-2">
+                      {staffState.filter((m) => m.active).map((member) => <option key={member.id} value={member.name}>{member.name} · {member.role}</option>)}
+                    </select>
+                    <select
+                      value={scheduleForm.sideworkWindow}
+                      onChange={(e) => setScheduleForm((prev) => ({ ...prev, sideworkWindow: e.target.value as "Open" | "Mid" | "Close" }))}
+                      className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                    >
+                      <option value="Open">Show Open sidework</option>
+                      <option value="Mid">Show Mid sidework</option>
+                      <option value="Close">Show Close sidework</option>
+                    </select>
+                    <p className="text-xs text-stone-500">This controls which sidework group staff see for this shift.</p>
+                    <button type="submit" className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">{scheduleForm.id ? "Update Shift" : "Add Shift"}</button>
+                    {scheduleForm.id ? <button type="button" onClick={() => resetScheduleForm()} className="w-full rounded-2xl bg-stone-200 px-4 py-2 text-sm font-bold text-stone-800">Cancel Edit</button> : null}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button type="button" onClick={publishSchedule} className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-bold text-stone-950">Publish Schedule</button>
+                      <button type="button" onClick={copyCurrentToNextWeek} className="rounded-2xl bg-stone-200 px-4 py-2 text-sm font-bold text-stone-800">Copy Current to Next</button>
+                      <button type="button" onClick={autoScheduleVisibleWeek} className="rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white sm:col-span-2">Auto Schedule Visible Week</button>
+                    </div>
+                    {publishMeta.lastPublishedAt ? <p className="text-xs text-stone-500">Last published: {publishMeta.lastPublishedAt}</p> : null}
+                  </form>
 
-                <div className="space-y-4">
-                  {visibleScheduleDays.map((day) => {
-                    const dayShifts = publishedSchedule.filter((row) => row.day === day.day && row.dateLabel === day.dateLabel);
-                    return (
-                      <div key={`${day.day}-${day.dateLabel}`} className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
-                        <div className="mb-3"><p className="font-semibold">{day.day}</p><p className="text-sm text-stone-500">{day.dateLabel}</p></div>
-                        {dayShifts.length ? (
-                          <div className="space-y-2">
-                            {dayShifts.map((shift) => (
-                              <SmallCard key={shift.id}>
-                                <p className="font-medium">{shift.shift} — {shift.employee}</p>
-                                <p className="text-sm text-stone-500">{shift.time}</p>
-                              </SmallCard>
-                            ))}
-                          </div>
-                        ) : <EmptyState text="No published shifts for this day." />}
+                  <div className="mt-5 rounded-3xl border border-stone-200 bg-stone-50 p-4">
+                    <h3 className="mb-3 text-sm font-black text-stone-900">Shift Templates</h3>
+                    <form onSubmit={addShiftTemplate} className="space-y-2">
+                      <input
+                        value={shiftTemplateForm.name}
+                        onChange={(e) => setShiftTemplateForm((prev) => ({ ...prev, name: e.target.value }))}
+                        placeholder="Shift name, ex: 10-4"
+                        className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                      />
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <input
+                          value={shiftTemplateForm.startTime}
+                          onChange={(e) => setShiftTemplateForm((prev) => ({ ...prev, startTime: e.target.value }))}
+                          placeholder="Start, ex: 10:00 AM"
+                          className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                        />
+                        <input
+                          value={shiftTemplateForm.endTime}
+                          onChange={(e) => setShiftTemplateForm((prev) => ({ ...prev, endTime: e.target.value }))}
+                          placeholder="End, ex: 4:00 PM"
+                          className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                        />
                       </div>
-                    );
-                  })}
+                      <select
+                        value={shiftTemplateForm.sideworkWindow}
+                        onChange={(e) => setShiftTemplateForm((prev) => ({ ...prev, sideworkWindow: e.target.value as "Open" | "Mid" | "Close" }))}
+                        className="w-full rounded-2xl border border-stone-300 px-3 py-2"
+                      >
+                        <option value="Open">Assign Open sidework</option>
+                        <option value="Mid">Assign Mid sidework</option>
+                        <option value="Close">Assign Close sidework</option>
+                      </select>
+                      <button type="submit" className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white">Create Shift Template</button>
+                    </form>
+                    <div className="mt-4 space-y-2">
+                      {shiftTemplates.map((template) => {
+                        const isDefaultTemplate = DEFAULT_SHIFT_TEMPLATES.some((item) => item.id === template.id);
+                        return (
+                          <SmallCard key={template.id}>
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <p className="font-bold">{template.name}</p>
+                                <p className="text-xs text-stone-500">{template.time} · {template.sideworkWindow} sidework</p>
+                              </div>
+                              {!isDefaultTemplate ? (
+                                <button
+                                  type="button"
+                                  onClick={() => deleteShiftTemplate(template.id)}
+                                  className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600"
+                                >
+                                  Delete
+                                </button>
+                              ) : (
+                                <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-bold text-stone-500">Default</span>
+                              )}
+                            </div>
+                          </SmallCard>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-sm text-stone-600">Staff can now view previous, current, and next week from the published schedule.</p>
+                  {myPublishedThisWeek.length ? myPublishedThisWeek.map((shift) => (
+                    <SmallCard key={`mine-${shift.id}`}><p className="font-bold">{shift.day}, {shift.dateLabel}</p><p className="text-sm text-stone-500">{shift.shift} · {shift.time}</p></SmallCard>
+                  )) : <EmptyState text="No personal published shifts for this selected week." />}
                 </div>
-              </AppCard>
-            )
-          ) : <AppCard title="Schedule Access"><EmptyState text="Log in to view the schedule." /></AppCard>
+              )}
+            </AppCard>
+
+            <AppCard title={isLeadership ? "Manager Schedule View" : "My Team Schedule"}>
+              <div className="space-y-4">
+                {visibleScheduleDays.map((day) => {
+                  const dayShifts = visibleScheduleSource.filter((row) => row.day === day.day && row.dateLabel === day.dateLabel);
+                  return (
+                    <div key={`${day.day}-${day.dateLabel}`} className="rounded-3xl border border-stone-200 bg-stone-50/80 p-4">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div><p className="font-black text-stone-900">{day.day}</p><p className="text-sm text-stone-500">{day.dateLabel}</p></div>
+                        {canManageSchedule ? <button type="button" onClick={() => clearDay(day)} className="rounded-full bg-white px-3 py-1 text-xs font-bold text-red-600 ring-1 ring-red-100">Clear Day</button> : null}
+                      </div>
+                      {dayShifts.length ? (
+                        <div className="space-y-3">
+                          {dayShifts.map((shift) => {
+                            const alert = scheduleAlerts[shift.id];
+                            return (
+                              <SmallCard
+                                key={shift.id}
+                                className={
+                                  shift.sideworkWindow === "Open"
+                                    ? "border-l-4 border-amber-400"
+                                    : shift.sideworkWindow === "Mid"
+                                    ? "border-l-4 border-sky-400"
+                                    : "border-l-4 border-stone-700"
+                                }
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div>
+                                    <div className="mb-1 flex items-center gap-2">
+                                      <span
+                                        className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${
+                                          shift.sideworkWindow === "Open"
+                                            ? "bg-amber-100 text-amber-900"
+                                            : shift.sideworkWindow === "Mid"
+                                            ? "bg-sky-100 text-sky-900"
+                                            : "bg-stone-200 text-stone-900"
+                                        }`}
+                                      >
+                                        {shift.sideworkWindow || shift.shift}
+                                      </span>
+
+                                      {publishedSchedule.some((published) => published.id === shift.id) ? (
+                                        <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">
+                                          Published
+                                        </span>
+                                      ) : isLeadership ? (
+                                        <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[10px] font-bold text-stone-600">
+                                          Draft
+                                        </span>
+                                      ) : null}
+                                    </div>
+
+                                    <p className="font-bold">{shift.shift} · {shift.employee}</p>
+                                  {(() => {
+                                    const role = getEmployeeRole(shift.employee, staffState);
+                                    return role ? (
+                                      <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getRoleBadgeClass(role)}`}>
+                                        {role}
+                                      </span>
+                                    ) : null;
+                                  })()}
+                                  <p className="mt-1 text-sm text-stone-500">{shift.time}</p>
+
+                                  {!isLeadership ? (
+                                    <p className="mt-1 text-xs text-stone-400">
+                                      Working with:{" "}
+                                      {visibleScheduleSource
+                                        .filter(
+                                          (coworker) =>
+                                            coworker.day === shift.day &&
+                                            coworker.dateLabel === shift.dateLabel &&
+                                            coworker.id !== shift.id &&
+                                            shiftsOverlap(shift.time, coworker.time)
+                                        )
+                                        .map((coworker) => coworker.employee)
+                                        .join(", ") || "No overlapping staff assigned"}
+                                    </p>
+                                  ) : (
+                                    <p className="text-xs text-stone-400">
+                                      Sidework Group: {shift.sideworkWindow || shift.shift}
+                                    </p>
+                                  )}
+                                </div>
+                                  {canManageSchedule ? <div className="flex gap-1"><button type="button" onClick={() => startEditShift(shift)} className="rounded-full bg-stone-900 px-2 py-1 text-xs text-white">Edit</button><button type="button" onClick={() => duplicateShift(shift)} className="rounded-full bg-amber-200 px-2 py-1 text-xs font-bold text-stone-900">Next</button><button type="button" onClick={() => removeScheduleShift(shift.id)} className="rounded-full bg-red-50 px-2 py-1 text-xs font-bold text-red-600">Del</button></div> : null}
+                                </div>
+                                {alert?.availabilityIssue || alert?.requestOffIssue || alert?.doubleBooked ? <div className="mt-2 rounded-2xl bg-red-50 p-2 text-xs text-red-700">{alert.availabilityIssue || alert.requestOffIssue || "Double booked warning."}</div> : null}
+                              </SmallCard>
+                            );
+                          })}
+                        </div>
+                      ) : <EmptyState text="No shifts for this day." />}
+                    </div>
+                  );
+                })}
+              </div>
+            </AppCard>
+          </div>
         ) : null}
 
         {activeView === "sidework" ? (
-          canManageSidework ? (
-            <div className="space-y-6">
-              <AppCard title="Manage Sidework">
-                <form onSubmit={addOrEditSidework} className="grid gap-3 md:grid-cols-6">
-                  <select value={sideworkForm.role} onChange={(e) => setSideworkForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
-                  </select>
-                  <input value={sideworkForm.task} onChange={(e) => setSideworkForm((prev) => ({ ...prev, task: e.target.value }))} placeholder="Task" className="rounded-2xl border border-stone-300 bg-white px-3 py-2" />
-                  <select value={sideworkForm.shiftWindow} onChange={(e) => setSideworkForm((prev) => ({ ...prev, shiftWindow: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {SIDEWORK_SHIFT_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                  <select value={sideworkForm.assignedTo} onChange={(e) => setSideworkForm((prev) => ({ ...prev, assignedTo: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {SIDEWORK_ASSIGN_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                  <select value={sideworkForm.team} onChange={(e) => setSideworkForm((prev) => ({ ...prev, team: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {TEAM_OPTIONS.map((team) => <option key={team} value={team}>{team}</option>)}
-                  </select>
-                  <div className="flex gap-2">
-                    <button type="submit" className="flex-1 rounded-2xl bg-stone-900 px-4 py-2 text-white">{sideworkForm.id ? "Update" : "Add"}</button>
-                    {sideworkForm.id ? <button type="button" onClick={resetSideworkForm} className="rounded-2xl bg-stone-200 px-4 py-2 text-stone-800">Clear</button> : null}
-                  </div>
-                </form>
-              </AppCard>
-
-              <AppCard title="Sidework Oversight & Review">
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]">
+            <AppCard title="Sidework Tools">
+              {currentUser ? (
                 <div className="space-y-4">
-                  <div className="grid gap-3 md:grid-cols-4">
-                    <SmallCard><p className="text-sm text-stone-500">Total tasks</p><p className="text-2xl font-semibold">{allSideworkItems.length}</p></SmallCard>
-                    <SmallCard><p className="text-sm text-stone-500">Completed</p><p className="text-2xl font-semibold text-green-600">{completedSideworkItems.length}</p></SmallCard>
-                    <SmallCard><p className="text-sm text-stone-500">Missed awaiting review</p><p className="text-2xl font-semibold text-red-600">{missedNeedingReview.length}</p></SmallCard>
-                    <SmallCard><p className="text-sm text-stone-500">Still pending</p><p className="text-2xl font-semibold text-amber-600">{pendingSideworkItems.length}</p></SmallCard>
-                  </div>
-
-                  <div className="space-y-2">
-                    <h3 className="text-sm font-semibold text-stone-800">Manager Review Queue</h3>
-                    {missedNeedingReview.length ? (
-                      missedNeedingReview.map((entry) => (
-                        <SmallCard key={entry.id} className="border-red-200 bg-red-50">
-                          <p className="font-medium">{entry.task}</p>
-                          <p className="text-sm text-stone-500">{entry.employee} · {entry.role}</p>
-                          <p className="text-xs text-red-600">Missed · {entry.note}</p>
-                          <button type="button" onClick={() => markMissedReviewed(entry.id)} className="mt-2 rounded-2xl bg-stone-900 px-3 py-1 text-xs text-white">Review Complete</button>
-                        </SmallCard>
-                      ))
-                    ) : (
-                      <EmptyState text="No missed tasks pending review." />
-                    )}
-                  </div>
+                  {!isLeadership ? (
+                    <>
+                      <div className="rounded-2xl bg-stone-50 p-3 ring-1 ring-stone-200"><p className="text-sm font-bold">My progress: {mySideworkProgress.completed}/{mySideworkProgress.total}</p><div className="mt-2 h-3 rounded-full bg-stone-200"><div className="h-3 rounded-full bg-amber-300" style={{ width: `${mySideworkProgress.percent}%` }} /></div></div>
+                      <div className="flex flex-wrap gap-2"><TabButton label="All" active={sideworkFilter === "All"} onClick={() => setSideworkFilter("All")} />{["Open", "Mid", "Close"].map((shift) => <TabButton key={shift} label={shift} active={sideworkFilter === shift} onClick={() => setSideworkFilter(shift)} />)}</div>
+                      <button type="button" onClick={completeAllMySidework} className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">Complete All Visible</button>
+                    </>
+                  ) : (
+                    <form onSubmit={addOrEditSidework} className="space-y-3">
+                      <select value={sideworkForm.role} onChange={(e) => setSideworkForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="w-full rounded-2xl border px-3 py-2">{ROLES.map((role) => <option key={role} value={role}>{role}</option>)}</select>
+                      <input value={sideworkForm.task} onChange={(e) => setSideworkForm((prev) => ({ ...prev, task: e.target.value }))} placeholder="Task" className="w-full rounded-2xl border px-3 py-2" />
+                      <select value={sideworkForm.team} onChange={(e) => setSideworkForm((prev) => ({ ...prev, team: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{TEAM_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
+                      <select value={sideworkForm.assignedTo} onChange={(e) => setSideworkForm((prev) => ({ ...prev, assignedTo: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{SIDEWORK_ASSIGN_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
+                      <select value={sideworkForm.shiftWindow} onChange={(e) => setSideworkForm((prev) => ({ ...prev, shiftWindow: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{SIDEWORK_SHIFT_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
+                      <button type="submit" className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">{sideworkForm.id ? "Update Task" : "Add Task"}</button>
+                    </form>
+                  )}
                 </div>
-              </AppCard>
-
-              <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => setShowSideworkHistory((prev) => !prev)} className="rounded-2xl bg-stone-900 px-4 py-2 text-sm text-white">
-                  {showSideworkHistory ? "Hide History" : "Show History"}
-                </button>
-              </div>
-
-              {showSideworkHistory ? (
-                <AppCard title="Sidework History">
-                  <div className="space-y-3">
-                    {sideworkLog.length ? (
-                      sideworkLog.slice(0, 20).map((entry) => (
-                        <SmallCard key={entry.id}>
-                          <p className="font-medium">{entry.task}</p>
-                          <p className="text-sm text-stone-500">{entry.employee} · {entry.role}</p>
-                          <p className="text-xs text-stone-400">Shift: {entry.shift} · {entry.timestamp}</p>
-                          <p className={`text-xs ${entry.completed ? "text-green-700" : "text-red-600"}`}>{entry.completed ? "Completed" : `Missed · ${entry.note}`}</p>
-                        </SmallCard>
-                      ))
-                    ) : (
-                      <EmptyState text="No sidework history yet." />
-                    )}
-                  </div>
-                </AppCard>
-              ) : null}
-            </div>
-          ) : currentUser ? (
-            <AppCard title="My Sidework Checklist">
-              <div className="mb-4 space-y-4">
-                <SmallCard className="bg-white">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-stone-800">Overall Progress</p>
-                    <p className="text-sm text-stone-500">{mySideworkProgress.completed} / {mySideworkProgress.total} completed</p>
-                  </div>
-                  <div className="h-3 w-full overflow-hidden rounded-full bg-stone-200">
-                    <div className="h-full rounded-full bg-stone-900 transition-all" style={{ width: `${mySideworkProgress.percent}%` }} />
-                  </div>
-                  <p className="mt-2 text-xs text-stone-500">{mySideworkProgress.percent}% complete</p>
-                </SmallCard>
-
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {myShiftProgress.map((item) => (
-                    <SmallCard key={item.shift} className="bg-white">
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-stone-800">{item.shift}</p>
-                        <p className="text-xs text-stone-500">{item.completed}/{item.total}</p>
-                      </div>
-                      <div className="h-2.5 w-full overflow-hidden rounded-full bg-stone-200">
-                        <div className="h-full rounded-full bg-stone-900 transition-all" style={{ width: `${item.percent}%` }} />
-                      </div>
-                      <p className="mt-2 text-xs text-stone-500">{item.percent}% complete</p>
-                    </SmallCard>
-                  ))}
-                </div>
-              </div>
-
-              <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                <select value={sideworkFilter} onChange={(e) => setSideworkFilter(e.target.value)} className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm sm:w-auto">
-                  <option value="All">All</option>
-                  <option value="Open">Open</option>
-                  <option value="Mid">Mid</option>
-                  <option value="Close">Close</option>
-                </select>
-
-                <button
-                  type="button"
-                  onClick={completeAllMySidework}
-                  disabled={visibleIncompleteMySideworkCount === 0}
-                  className={`w-full rounded-2xl px-4 py-2 text-sm text-white sm:w-auto ${
-                    visibleIncompleteMySideworkCount === 0 ? "cursor-not-allowed bg-stone-300" : "bg-stone-900"
-                  }`}
-                >
-                  Complete Visible Tasks
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                {mySideworkItems.length ? (
-                  mySideworkItems.map((item) => (
-                    <SmallCard key={item.id}>
-                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                        <div>
-                          <p className="font-medium">{item.task}</p>
-                          <p className="text-sm text-stone-500">{item.team}</p>
-                          <p className="text-xs text-stone-400">Shift: {item.shiftWindow} · For: {item.assignedTo}</p>
-                          <p className={`text-xs ${sideworkCompletionState[item.id]?.status === "completed" ? "text-green-600" : sideworkCompletionState[item.id]?.status === "missed" ? "text-red-600" : "text-amber-600"}`}>
-                            {sideworkCompletionState[item.id]?.status === "completed"
-                              ? `Completed by ${sideworkCompletionState[item.id]?.completedBy} at ${sideworkCompletionState[item.id]?.completedAt}`
-                              : sideworkCompletionState[item.id]?.status === "missed"
-                              ? `Marked missed by ${sideworkCompletionState[item.id]?.completedBy} at ${sideworkCompletionState[item.id]?.completedAt} · ${sideworkCompletionState[item.id]?.note}`
-                              : "Pending completion"}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-col gap-2">
-                          <label className="flex items-center gap-2 text-sm font-medium text-stone-700">
-                            <input type="checkbox" checked={sideworkCompletionState[item.id]?.status === "completed"} onChange={() => toggleSideworkCompletion(item.id)} />
-                            Mark task complete
-                          </label>
-
-                          <button type="button" onClick={() => setMissedTaskDraft((prev) => ({ itemId: prev.itemId === item.id ? null : item.id, note: prev.itemId === item.id ? "" : prev.note }))} className="rounded-2xl bg-red-50 px-3 py-2 text-xs font-medium text-red-600">
-                            Report missed task
-                          </button>
-
-                          {missedTaskDraft.itemId === item.id ? (
-                            <div className="space-y-2 rounded-2xl border border-red-200 bg-red-50 p-3">
-                              <textarea value={missedTaskDraft.note} onChange={(e) => setMissedTaskDraft({ itemId: item.id, note: e.target.value })} placeholder="Why was this not completed?" className="min-h-[80px] w-full rounded-2xl border border-red-200 bg-white px-3 py-2 text-sm" />
-                              <div className="flex gap-2">
-                                <button type="button" onClick={() => submitMissedTask(item.id)} className="rounded-2xl bg-stone-900 px-3 py-2 text-xs text-white">Submit missed note</button>
-                                <button type="button" onClick={() => setMissedTaskDraft({ itemId: null, note: "" })} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Cancel</button>
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                    </SmallCard>
-                  ))
-                ) : (
-                  <EmptyState text="No sidework is assigned to your role right now." />
-                )}
-              </div>
+              ) : <EmptyState text="Login to use sidework." />}
             </AppCard>
-          ) : <AppCard title="Sidework Access"><EmptyState text="Log in to view and complete sidework." /></AppCard>
+            <AppCard title={isLeadership ? "All Sidework" : "My Sidework"}>
+              {!currentUser ? <EmptyState text="Login to view sidework." /> : isLeadership ? (
+                <div className="space-y-4">{ROLES.map((role) => <div key={role}><h3 className="mb-2 font-black">{role}</h3><div className="grid gap-2 md:grid-cols-2">{(sideworkState[role] || []).map((item) => <SmallCard key={item.id}><p className="font-bold">{item.task}</p><p className="text-xs text-stone-500">{item.team} · {item.shiftWindow}</p><div className="mt-2 flex gap-1"><button onClick={() => startEditSidework(role, item)} className="rounded-full bg-stone-900 px-2 py-1 text-xs text-white">Edit</button><button onClick={() => removeSidework(role, item.id)} className="rounded-full bg-red-50 px-2 py-1 text-xs font-bold text-red-600">Delete</button></div></SmallCard>)}</div></div>)}</div>
+              ) : (
+                <div className="space-y-3">{mySideworkItems.length ? mySideworkItems.map((item) => { const state = sideworkCompletionState[item.id]; return <SmallCard key={item.id}><p className="font-bold">{item.task}</p><p className="text-xs text-stone-500">{item.team} · {item.shiftWindow}</p><div className="mt-2 flex flex-wrap gap-2"><button onClick={() => toggleSideworkCompletion(item.id)} className={`rounded-full px-3 py-1 text-xs font-bold ${state?.status === "completed" ? "bg-green-100 text-green-700" : "bg-stone-900 text-white"}`}>{state?.status === "completed" ? "Completed" : "Mark Complete"}</button><button onClick={() => setMissedTaskDraft({ itemId: item.id, note: "" })} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-stone-900">Mark Missed</button></div>{missedTaskDraft.itemId === item.id ? <div className="mt-2 space-y-2"><input value={missedTaskDraft.note} onChange={(e) => setMissedTaskDraft((prev) => ({ ...prev, note: e.target.value }))} placeholder="Reason / note" className="w-full rounded-2xl border px-3 py-2 text-sm" /><button onClick={() => submitMissedTask(item.id)} className="rounded-full bg-stone-900 px-3 py-1 text-xs font-bold text-white">Submit Missed</button></div> : null}</SmallCard>; }) : <EmptyState text="No sidework for this selection." />}</div>
+              )}
+            </AppCard>
+          </div>
         ) : null}
 
         {activeView === "availability" ? (
-          <div className="space-y-6">
-            <AppCard title="Submit Availability Request">
-              <form onSubmit={submitAvailability} className="grid gap-3 md:grid-cols-4">
-                <select value={availabilityForm.employee} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, employee: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {staffState.filter((member) => member.active).map((member) => <option key={member.id} value={member.name}>{member.name}</option>)}
-                </select>
-                <select value={availabilityForm.day} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, day: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {DAY_OPTIONS.map((day) => <option key={day} value={day}>{day}</option>)}
-                </select>
-                <select value={availabilityForm.restriction} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, restriction: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {AVAILABILITY_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
-                <button type="submit" className="rounded-2xl bg-stone-900 px-4 py-2 text-white">Submit Availability</button>
-              </form>
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]">
+            <AppCard title="Submit Availability">
+              {currentUser ? <form onSubmit={submitAvailability} className="space-y-3"><select value={availabilityForm.employee} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, employee: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{staffState.filter((m) => m.active).map((m) => <option key={m.id}>{m.name}</option>)}</select><select value={availabilityForm.day} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, day: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{DAY_OPTIONS.map((d) => <option key={d}>{d}</option>)}</select><select value={availabilityForm.restriction} onChange={(e) => setAvailabilityForm((prev) => ({ ...prev, restriction: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{AVAILABILITY_OPTIONS.map((d) => <option key={d}>{d}</option>)}</select><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">Submit</button></form> : <EmptyState text="Login to submit availability." />}
             </AppCard>
-
-            <AppCard title="Availability Requests">
-              <div className="space-y-3">
-                {availabilityRequests.length ? (
-                  availabilityRequests.map((item) => (
-                    <SmallCard key={item.id}>
-                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                        <div>
-                          <p className="font-medium">{item.employee}</p>
-                          <p className="text-sm text-stone-500">{item.day}</p>
-                          <p className="text-sm text-stone-700">{item.restriction}</p>
-                          <p className={`text-xs ${item.status === "Approved" ? "text-green-600" : item.status === "Denied" ? "text-red-600" : "text-amber-600"}`}>{item.status}</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {canManageApprovals ? (
-                            <>
-                              <button type="button" onClick={() => updateAvailabilityStatus(item.id, "Approved")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Approve</button>
-                              <button type="button" onClick={() => updateAvailabilityStatus(item.id, "Denied")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Deny</button>
-                              <button type="button" onClick={() => removeAvailabilityRule(item.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-                            </>
-                          ) : <span className="text-xs text-stone-400">Leadership review only</span>}
-                        </div>
-                      </div>
-                    </SmallCard>
-                  ))
-                ) : <EmptyState text="No availability requests yet." />}
-              </div>
-            </AppCard>
+            <AppCard title="Availability Requests"><div className="space-y-2">{availabilityRequests.map((item) => <SmallCard key={item.id}><p className="font-bold">{item.employee} · {item.day}</p><p className="text-sm text-stone-500">{item.restriction}</p><p className="text-xs font-bold text-amber-700">{item.status}</p>{canManageApprovals ? <div className="mt-2 flex gap-2"><button onClick={() => updateAvailabilityStatus(item.id, "Approved")} className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">Approve</button><button onClick={() => updateAvailabilityStatus(item.id, "Denied")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">Deny</button><button onClick={() => removeAvailabilityRule(item.id)} className="rounded-full bg-stone-200 px-3 py-1 text-xs font-bold">Remove</button></div> : null}</SmallCard>)}</div></AppCard>
           </div>
         ) : null}
 
         {activeView === "requestOff" ? (
-          <div className="space-y-6">
-            <AppCard title="Submit Request Off">
-              <form onSubmit={submitRequestOff} className="grid gap-3 md:grid-cols-4">
-                <select value={requestOffForm.employee} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, employee: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {staffState.filter((member) => member.active).map((member) => <option key={member.id} value={member.name}>{member.name}</option>)}
-                </select>
-                <select value={requestOffForm.date} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, date: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {allScheduleDates.map((date) => <option key={date.dateLabel} value={date.dateLabel}>{date.day} - {date.dateLabel}</option>)}
-                </select>
-                <select value={requestOffForm.shift} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, shift: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                  {REQUEST_OFF_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
-                <input value={requestOffForm.note} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Reason / note" className="rounded-2xl border border-stone-300 bg-white px-3 py-2" />
-                <button type="submit" className="rounded-2xl bg-stone-900 px-4 py-2 text-white md:col-span-4">Submit Request Off</button>
-              </form>
-            </AppCard>
-
-            <AppCard title="Request Off List">
-              <div className="space-y-3">
-                {requestOffs.length ? (
-                  requestOffs.map((item) => (
-                    <SmallCard key={item.id}>
-                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                        <div>
-                          <p className="font-medium">{item.employee}</p>
-                          <p className="text-sm text-stone-500">{item.date} — {item.shift}</p>
-                          <p className="text-sm text-stone-700">{item.note || "No note"}</p>
-                          <p className={`text-xs ${item.status === "Approved" ? "text-green-600" : item.status === "Denied" ? "text-red-600" : "text-amber-600"}`}>{item.status}</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {canManageApprovals ? (
-                            <>
-                              <button type="button" onClick={() => updateRequestOffStatus(item.id, "Approved")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Approve</button>
-                              <button type="button" onClick={() => updateRequestOffStatus(item.id, "Denied")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Deny</button>
-                              <button type="button" onClick={() => removeRequestOff(item.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-                            </>
-                          ) : <span className="text-xs text-stone-400">Leadership review only</span>}
-                        </div>
-                      </div>
-                    </SmallCard>
-                  ))
-                ) : <EmptyState text="No request-offs yet." />}
-              </div>
-            </AppCard>
-          </div>
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]"><AppCard title="Request Off">{currentUser ? <form onSubmit={submitRequestOff} className="space-y-3"><select value={requestOffForm.employee} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, employee: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{staffState.filter((m) => m.active).map((m) => <option key={m.id}>{m.name}</option>)}</select><select value={requestOffForm.date} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, date: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{allScheduleDates.map((d) => <option key={`${d.day}-${d.dateLabel}`} value={d.dateLabel}>{d.day} · {d.dateLabel}</option>)}</select><select value={requestOffForm.shift} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, shift: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{REQUEST_OFF_OPTIONS.map((o) => <option key={o}>{o}</option>)}</select><input value={requestOffForm.note} onChange={(e) => setRequestOffForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Note" className="w-full rounded-2xl border px-3 py-2" /><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-white">Submit</button></form> : <EmptyState text="Login to request off." />}</AppCard><AppCard title="Request Off List"><div className="space-y-2">{requestOffs.map((item) => <SmallCard key={item.id}><p className="font-bold">{item.employee} · {item.date}</p><p className="text-sm text-stone-500">{item.shift} · {item.note}</p><p className="text-xs font-bold text-amber-700">{item.status}</p>{canManageApprovals ? <div className="mt-2 flex gap-2"><button onClick={() => updateRequestOffStatus(item.id, "Approved")} className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">Approve</button><button onClick={() => updateRequestOffStatus(item.id, "Denied")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">Deny</button><button onClick={() => removeRequestOff(item.id)} className="rounded-full bg-stone-200 px-3 py-1 text-xs font-bold">Remove</button></div> : null}</SmallCard>)}</div></AppCard></div>
         ) : null}
 
         {activeView === "tradeShifts" ? (
-          currentUser ? (
-            <div className="space-y-6">
-              <AppCard title="Request a Shift Trade">
-                <form onSubmit={submitTradeRequest} className="grid gap-3 md:grid-cols-5">
-                  <select value={tradeForm.employee} onChange={(e) => setTradeForm((prev) => ({ ...prev, employee: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {staffState.filter((member) => member.active).map((member) => <option key={member.id} value={member.name}>{member.name}</option>)}
-                  </select>
-                  <select value={tradeForm.shiftId} onChange={(e) => setTradeForm((prev) => ({ ...prev, shiftId: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    <option value="">Select your shift</option>
-                    {scheduleState.filter((shift) => shift.employee === tradeForm.employee).map((shift) => <option key={shift.id} value={String(shift.id)}>{shift.dateLabel} — {shift.shift}</option>)}
-                  </select>
-                  <select value={tradeForm.tradeWith} onChange={(e) => setTradeForm((prev) => ({ ...prev, tradeWith: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    <option value="">Trade with</option>
-                    {staffState.filter((member) => member.active && member.name !== tradeForm.employee).map((member) => <option key={member.id} value={member.name}>{member.name}</option>)}
-                  </select>
-                  <select value={tradeForm.requestedShift} onChange={(e) => setTradeForm((prev) => ({ ...prev, requestedShift: e.target.value }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {REQUEST_OFF_OPTIONS.filter((option) => option !== "All Day").map((option) => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                  <input value={tradeForm.note} onChange={(e) => setTradeForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Reason / note" className="rounded-2xl border border-stone-300 bg-white px-3 py-2" />
-                  <button type="submit" className="rounded-2xl bg-stone-900 px-4 py-2 text-white md:col-span-5">Submit Trade Request</button>
-                </form>
-              </AppCard>
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]"><AppCard title="Trade Shift Request">{currentUser ? <form onSubmit={submitTradeRequest} className="space-y-3"><select value={tradeForm.employee} onChange={(e) => setTradeForm((prev) => ({ ...prev, employee: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{staffState.filter((m) => m.active).map((m) => <option key={m.id}>{m.name}</option>)}</select><select value={tradeForm.shiftId} onChange={(e) => setTradeForm((prev) => ({ ...prev, shiftId: e.target.value }))} className="w-full rounded-2xl border px-3 py-2"><option value="">Select shift</option>{publishedSchedule.map((s) => <option key={s.id} value={s.id}>{s.employee} · {s.day} {s.dateLabel} · {s.shift}</option>)}</select><select value={tradeForm.tradeWith} onChange={(e) => setTradeForm((prev) => ({ ...prev, tradeWith: e.target.value }))} className="w-full rounded-2xl border px-3 py-2"><option value="">Trade with</option>{staffState.filter((m) => m.active).map((m) => <option key={m.id}>{m.name}</option>)}</select><select value={tradeForm.requestedShift} onChange={(e) => setTradeForm((prev) => ({ ...prev, requestedShift: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{REQUEST_OFF_OPTIONS.filter((o) => o !== "All Day").map((o) => <option key={o}>{o}</option>)}</select><input value={tradeForm.note} onChange={(e) => setTradeForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Note" className="w-full rounded-2xl border px-3 py-2" /><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-white">Submit Trade</button></form> : <EmptyState text="Login to trade shifts." />}</AppCard><AppCard title="Trade Requests"><div className="space-y-2">{tradeRequests.map((item) => {
+                const requestedShiftRow = publishedSchedule.find((shift) => shift.id === item.shiftId) || scheduleState.find((shift) => shift.id === item.shiftId);
+                const tradePartnerSameDayShift = requestedShiftRow
+                  ? publishedSchedule.find(
+                      (shift) =>
+                        shift.employee === item.tradeWith &&
+                        shift.day === requestedShiftRow.day &&
+                        shift.dateLabel === requestedShiftRow.dateLabel
+                    ) ||
+                    scheduleState.find(
+                      (shift) =>
+                        shift.employee === item.tradeWith &&
+                        shift.day === requestedShiftRow.day &&
+                        shift.dateLabel === requestedShiftRow.dateLabel
+                    )
+                  : null;
 
-              <AppCard title="Trade Requests">
-                <div className="space-y-3">
-                  {tradeRequests.length ? (
-                    tradeRequests.map((item) => {
-                      const sourceShift = scheduleState.find((shift) => shift.id === item.shiftId);
-                      return (
-                        <SmallCard key={item.id}>
-                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div>
-                              <p className="font-medium">{item.employee} → {item.tradeWith}</p>
-                              <p className="text-sm text-stone-500">{sourceShift ? `${sourceShift.dateLabel} — ${sourceShift.shift}` : `Shift #${item.shiftId}`}</p>
-                              <p className="text-sm text-stone-700">Requested shift: {item.requestedShift}</p>
-                              <p className="text-sm text-stone-700">{item.note || "No note"}</p>
-                              <p className={`text-xs ${item.status === "Approved" ? "text-green-600" : item.status === "Denied" ? "text-red-600" : "text-amber-600"}`}>{item.status}</p>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              {canManageApprovals ? (
-                                <>
-                                  <button type="button" onClick={() => updateTradeStatus(item.id, "Approved")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Approve</button>
-                                  <button type="button" onClick={() => updateTradeStatus(item.id, "Denied")} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Deny</button>
-                                  <button type="button" onClick={() => removeTradeRequest(item.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-                                </>
-                              ) : <span className="text-xs text-stone-400">Leadership review only</span>}
-                            </div>
-                          </div>
-                        </SmallCard>
-                      );
-                    })
-                  ) : <EmptyState text="No trade requests yet." />}
-                </div>
-              </AppCard>
-            </div>
-          ) : <AppCard title="Trade Shift Access"><EmptyState text="Log in to request a trade shift." /></AppCard>
-        ) : null}
-
-        {activeView === "approvals" ? (
-          canManageApprovals ? (
-            <div className="space-y-6">
-              <AppCard title="Approvals Overview">
-                <div className="grid gap-3 md:grid-cols-3">
-                  <SmallCard><p className="text-sm text-stone-500">Pending availability</p><p className="text-2xl font-semibold">{availabilityRequests.filter((item) => item.status === "Pending Manager Approval").length}</p></SmallCard>
-                  <SmallCard><p className="text-sm text-stone-500">Pending request-offs</p><p className="text-2xl font-semibold">{requestOffs.filter((item) => item.status === "Pending Manager Approval").length}</p></SmallCard>
-                  <SmallCard><p className="text-sm text-stone-500">Pending trade requests</p><p className="text-2xl font-semibold">{tradeRequests.filter((item) => item.status === "Pending Manager Approval").length}</p></SmallCard>
-                </div>
-              </AppCard>
-            </div>
-          ) : <AppCard title="Approvals Access"><EmptyState text="Only managers and general managers can review approvals." /></AppCard>
-        ) : null}
-
-        {activeView === "staff" ? (
-          canManageStaff ? (
-            <div className="space-y-6">
-              <AppCard title="Add Staff Member">
-                <form onSubmit={addStaffMember} className="grid gap-3 md:grid-cols-4">
-                  <input value={staffForm.name} onChange={(e) => setStaffForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Name" className="rounded-2xl border border-stone-300 bg-white px-3 py-2" />
-                  <select value={staffForm.role} onChange={(e) => setStaffForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2">
-                    {ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
-                  </select>
-                  <input value={staffForm.pin} onChange={(e) => setStaffForm((prev) => ({ ...prev, pin: digitsOnly(e.target.value).slice(0, 4) }))} placeholder="4-digit PIN" className="rounded-2xl border border-stone-300 bg-white px-3 py-2" maxLength={4} />
-                  <button type="submit" className="rounded-2xl bg-stone-900 px-4 py-2 text-white">Add Staff</button>
-                </form>
-              </AppCard>
-
-              <AppCard title="Staff Members">
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {staffState.map((member) => (
-                    <SmallCard key={member.id}>
-                      <div className="space-y-3">
-                        <div>
-                          <p className="font-medium">{member.name}</p>
-                          <p className="text-sm text-stone-500">{member.role}</p>
-                          <p className={`text-xs ${member.active ? "text-green-600" : "text-red-600"}`}>{member.active ? "Active" : "Inactive"}</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => updateStaffRole(member.id, ROLES[(ROLES.indexOf(member.role) + 1) % ROLES.length])} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">Change Role</button>
-                          <button type="button" onClick={() => toggleStaffActive(member.id)} className="rounded-2xl bg-stone-200 px-3 py-2 text-xs text-stone-800">{member.active ? "Deactivate" : "Activate"}</button>
-                          <button type="button" onClick={() => removeStaffMember(member.id)} className="rounded-2xl bg-red-50 px-3 py-2 text-xs text-red-600">Remove</button>
-                        </div>
+                return (
+                  <SmallCard key={item.id}>
+                    <p className="font-bold">{item.employee} → {item.tradeWith}</p>
+                    {requestedShiftRow ? (
+                      <div className="mt-1 rounded-2xl bg-stone-50 p-2 text-sm text-stone-600 ring-1 ring-stone-100">
+                        <p className="font-semibold text-stone-800">Shift being traded:</p>
+                        <p>{requestedShiftRow.day}, {requestedShiftRow.dateLabel}</p>
+                        <p>{requestedShiftRow.shift} · {requestedShiftRow.time}</p>
+                        {tradePartnerSameDayShift ? (
+                          <p className="mt-1 text-xs text-stone-500">
+                            {item.tradeWith}'s same-day shift: {tradePartnerSameDayShift.shift} · {tradePartnerSameDayShift.time}
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-xs text-stone-500">{item.tradeWith} has no same-day shift listed.</p>
+                        )}
                       </div>
-                    </SmallCard>
-                  ))}
-                </div>
-              </AppCard>
-            </div>
-          ) : <AppCard title="Staff Access"><EmptyState text="Only managers and general managers can manage staff." /></AppCard>
+                    ) : (
+                      <p className="mt-1 text-sm text-red-600">Original shift could not be found.</p>
+                    )}
+                    <p className="mt-2 text-sm text-stone-500">Requested: {item.requestedShift} · {item.note || "No note"}</p>
+                    <p className="text-xs font-bold text-amber-700">{item.status}</p>
+                    {canManageApprovals ? (
+                      <div className="mt-2 flex gap-2">
+                        <button onClick={() => updateTradeStatus(item.id, "Approved")} className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">Approve</button>
+                        <button onClick={() => updateTradeStatus(item.id, "Denied")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">Deny</button>
+                        <button onClick={() => removeTradeRequest(item.id)} className="rounded-full bg-stone-200 px-3 py-1 text-xs font-bold">Remove</button>
+                      </div>
+                    ) : null}
+                  </SmallCard>
+                );
+              })}</div></AppCard></div>
+        ) : null}
+
+        {activeView === "approvals" && canManageApprovals ? (
+          <div className="grid gap-6 lg:grid-cols-3"><AppCard title="Pending Availability"><div className="space-y-2">{availabilityRequests.filter((i) => i.status === "Pending Manager Approval").map((item) => <SmallCard key={item.id}><p className="font-bold">{item.employee}</p><p className="text-sm">{item.day} · {item.restriction}</p><div className="mt-2 flex gap-2"><button onClick={() => updateAvailabilityStatus(item.id, "Approved")} className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">Approve</button><button onClick={() => updateAvailabilityStatus(item.id, "Denied")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">Deny</button></div></SmallCard>)}</div></AppCard><AppCard title="Pending Request Off"><div className="space-y-2">{requestOffs.filter((i) => i.status === "Pending Manager Approval").map((item) => <SmallCard key={item.id}><p className="font-bold">{item.employee}</p><p className="text-sm">{item.date} · {item.shift}</p><div className="mt-2 flex gap-2"><button onClick={() => updateRequestOffStatus(item.id, "Approved")} className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">Approve</button><button onClick={() => updateRequestOffStatus(item.id, "Denied")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">Deny</button></div></SmallCard>)}</div></AppCard><AppCard title="Missed Sidework"><div className="space-y-2">{missedNeedingReview.length ? missedNeedingReview.map((entry) => <SmallCard key={entry.id}><p className="font-bold">{entry.task}</p><p className="text-sm text-stone-500">{entry.employee} · {entry.note}</p><button onClick={() => markMissedReviewed(entry.id)} className="mt-2 rounded-full bg-stone-900 px-3 py-1 text-xs font-bold text-white">Mark Reviewed</button></SmallCard>) : <EmptyState text="No missed sidework needing review." />}</div></AppCard></div>
+        ) : null}
+
+        {activeView === "staff" && canManageStaff ? (
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]"><AppCard title="Add Staff"><form onSubmit={addStaffMember} className="space-y-3"><input value={staffForm.name} onChange={(e) => setStaffForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Name" className="w-full rounded-2xl border px-3 py-2" /><select value={staffForm.role} onChange={(e) => setStaffForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="w-full rounded-2xl border px-3 py-2">{ROLES.map((role) => <option key={role}>{role}</option>)}</select><input value={staffForm.pin} onChange={(e) => setStaffForm((prev) => ({ ...prev, pin: digitsOnly(e.target.value).slice(0, 4) }))} placeholder="4-digit PIN" className="w-full rounded-2xl border px-3 py-2" /><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-white">Add Staff</button></form></AppCard><AppCard title="Staff List"><div className="space-y-2">{staffState.map((member) => <SmallCard key={member.id}><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">{member.name}</p><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getRoleBadgeClass(member.role)}`}>{member.role}</span><p className="mt-1 text-xs text-stone-500">PIN: {member.pin} · {member.active ? "Active" : "Inactive"}</p></div><select value={member.role} onChange={(e) => updateStaffRole(member.id, e.target.value as Role)} className="rounded-2xl border px-3 py-2 text-sm">{ROLES.map((role) => <option key={role}>{role}</option>)}</select></div><div className="mt-2 flex gap-2"><button onClick={() => toggleStaffActive(member.id)} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-stone-900">{member.active ? "Deactivate" : "Activate"}</button><button onClick={() => removeStaffMember(member.id)} className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600">Remove</button></div></SmallCard>)}</div></AppCard></div>
         ) : null}
       </div>
     </div>
