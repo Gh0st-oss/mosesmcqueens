@@ -1329,7 +1329,7 @@ const [scheduleForm, setScheduleForm] = useState({
   }, [visibleScheduleSource, allScheduleDates]);
 
   const myPublishedShifts = useMemo(() => {
-    if (!currentUser || isLeadership) return [];
+    if (!currentUser) return [];
 
     const order = allScheduleDates.map((d) => `${d.day}-${d.dateLabel}`);
     const todayIndex = order.indexOf(`${todayDayName}-${todayDateLabel}`);
@@ -1347,7 +1347,7 @@ const [scheduleForm, setScheduleForm] = useState({
         if (aIndex !== bIndex) return aIndex - bIndex;
         return a.shift.localeCompare(b.shift);
       });
-  }, [currentUser, isLeadership, publishedSchedule, allScheduleDates, todayDayName, todayDateLabel]);
+  }, [currentUser, publishedSchedule, allScheduleDates, todayDayName, todayDateLabel]);
 
   const myNextShift = myPublishedShifts[0] || null;
   const myFollowingShift = myPublishedShifts[1] || null;
@@ -1383,7 +1383,7 @@ const [scheduleForm, setScheduleForm] = useState({
 
   const myPublishedThisWeek = useMemo(
     () => {
-      if (!currentUser || isLeadership) return [];
+      if (!currentUser) return [];
       const dayOrder = visibleScheduleDays.map((day) => `${day.day}-${day.dateLabel}`);
       return publishedSchedule
         .filter(
@@ -1398,7 +1398,7 @@ const [scheduleForm, setScheduleForm] = useState({
           return a.time.localeCompare(b.time);
         });
     },
-    [currentUser, isLeadership, publishedSchedule, visibleScheduleDays]
+    [currentUser, publishedSchedule, visibleScheduleDays]
   );
 
   const publishedThisWeek = useMemo(
