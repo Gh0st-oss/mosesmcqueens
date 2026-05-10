@@ -21,12 +21,21 @@ type View =
 
 type WeekKey = "previous" | "current" | "next";
 
+type StaffPermissions = {
+  schedule: boolean;
+  sidework: boolean;
+  approvals: boolean;
+  staff: boolean;
+  cloudSync: boolean;
+};
+
 type StaffMember = {
   id: number;
   name: string;
   role: Role;
   pin: string;
   active: boolean;
+  permissions?: StaffPermissions;
 };
 
 type ShiftTemplate = {
@@ -34,6 +43,7 @@ type ShiftTemplate = {
   name: string;
   time: string;
   sideworkWindow: "Open" | "Mid" | "Close";
+  active?: boolean;
 };
 
 type ShiftRow = {
@@ -132,16 +142,46 @@ const ROLES: Role[] = [
   "Back of House",
 ];
 
+const DEFAULT_PERMISSIONS: StaffPermissions = {
+  schedule: false,
+  sidework: false,
+  approvals: false,
+  staff: false,
+  cloudSync: false,
+};
+
+const MANAGER_PERMISSIONS: StaffPermissions = {
+  schedule: true,
+  sidework: true,
+  approvals: true,
+  staff: false,
+  cloudSync: false,
+};
+
+const GM_PERMISSIONS: StaffPermissions = {
+  schedule: true,
+  sidework: true,
+  approvals: true,
+  staff: true,
+  cloudSync: true,
+};
+
+function getDefaultPermissionsForRole(role: Role): StaffPermissions {
+  if (role === "General Manager") return { ...GM_PERMISSIONS };
+  if (role === "Manager") return { ...MANAGER_PERMISSIONS };
+  return { ...DEFAULT_PERMISSIONS };
+}
+
 const STAFF_SEED: StaffMember[] = [
-  { id: 1, name: "Jay", role: "Bartender", pin: "1234", active: true },
-  { id: 2, name: "Dawn", role: "Bartender", pin: "4321", active: true },
-  { id: 3, name: "Chris", role: "Manager", pin: "5678", active: true },
+  { id: 1, name: "Jay", role: "Bartender", pin: "1234", active: true, permissions: getDefaultPermissionsForRole("Bartender") },
+  { id: 2, name: "Dawn", role: "Bartender", pin: "4321", active: true, permissions: getDefaultPermissionsForRole("Bartender") },
+  { id: 3, name: "Chris", role: "Manager", pin: "5678", active: true, permissions: getDefaultPermissionsForRole("Manager") },
 ];
 
 const DEFAULT_SHIFT_TEMPLATES: ShiftTemplate[] = [
-  { id: 1, name: "Open", time: "9:00 AM - 5:00 PM", sideworkWindow: "Open" },
-  { id: 2, name: "Mid", time: "12:00 PM - 8:00 PM", sideworkWindow: "Mid" },
-  { id: 3, name: "Close", time: "5:00 PM - 1:00 AM", sideworkWindow: "Close" },
+  { id: 1, name: "Open", time: "9:00 AM - 5:00 PM", sideworkWindow: "Open", active: true },
+  { id: 2, name: "Mid", time: "12:00 PM - 8:00 PM", sideworkWindow: "Mid", active: true },
+  { id: 3, name: "Close", time: "5:00 PM - 1:00 AM", sideworkWindow: "Close", active: true },
 ];
 
 const WEEK_DAY_NAMES = [
@@ -390,14 +430,7 @@ const DAY_OPTIONS = [
 ];
 
 const TEAM_OPTIONS = ["Open Team", "Mid Team", "Close Team", "Leadership"];
-const SIDEWORK_ASSIGN_OPTIONS = [
-  "Bartender",
-  "Bar Back",
-  "Back of House",
-  "Lead",
-  "Manager",
-  "General Manager",
-];
+
 const SIDEWORK_SHIFT_OPTIONS = ["Open", "Mid", "Close", "Any"];
 
 const AVAILABILITY_OPTIONS = [
@@ -678,6 +711,14 @@ function digitsOnly(value: string) {
   return value.split("").filter((ch) => ch >= "0" && ch <= "9").join("");
 }
 
+function getStaffPermissions(member: StaffMember | null): StaffPermissions {
+  if (!member) return { ...DEFAULT_PERMISSIONS };
+  return {
+    ...getDefaultPermissionsForRole(member.role),
+    ...(member.permissions || {}),
+  };
+}
+
 function getAvailabilityIssue(
   employee: string,
   day: string,
@@ -871,6 +912,7 @@ const [scheduleForm, setScheduleForm] = useState({
     sideworkWindow: DEFAULT_SHIFT_TEMPLATES[0].sideworkWindow,
   });
   const [shiftTemplateForm, setShiftTemplateForm] = useState({
+    id: null as number | null,
     name: "",
     startTime: "10:00 AM",
     endTime: "4:00 PM",
@@ -881,7 +923,6 @@ const [scheduleForm, setScheduleForm] = useState({
     role: "Bartender" as Role,
     task: "",
     team: "Open Team",
-    assignedTo: "Bartender",
     shiftWindow: "Open",
     active: true,
   });
@@ -912,6 +953,8 @@ const [scheduleForm, setScheduleForm] = useState({
   const [sideworkFilter, setSideworkFilter] = useState("All");
   const [activeShift, setActiveShift] = useState<string | null>(null);
   const [showShiftSelector, setShowShiftSelector] = useState(false);
+  const [showScheduleBuilder, setShowScheduleBuilder] = useState(true);
+  const [showShiftTemplates, setShowShiftTemplates] = useState(false);
   const [missedTaskDraft, setMissedTaskDraft] = useState<MissedTaskDraft>({ itemId: null, note: "" });
 
   useEffect(() => {
@@ -1186,13 +1229,50 @@ const [scheduleForm, setScheduleForm] = useState({
   );
   const visibleScheduleDays = useMemo(() => WEEK_DATE_MAP[calendarWeek], [calendarWeek]);
 
+  const availableShiftTemplates = useMemo(() => {
+    const templateMap = new Map<string, ShiftTemplate>();
+
+    shiftTemplates.forEach((template) => {
+      templateMap.set(template.name, { ...template, active: template.active !== false });
+    });
+
+    [...scheduleState, ...publishedSchedule].forEach((row) => {
+      if (templateMap.has(row.shift)) return;
+
+      const inferredSideworkWindow =
+        row.sideworkWindow === "Open" || row.sideworkWindow === "Mid" || row.sideworkWindow === "Close"
+          ? row.sideworkWindow
+          : row.shift.toLowerCase().includes("close")
+          ? "Close"
+          : row.shift.toLowerCase().includes("mid")
+          ? "Mid"
+          : "Open";
+
+      templateMap.set(row.shift, {
+        id: Date.now() + templateMap.size,
+        name: row.shift,
+        time: row.time,
+        sideworkWindow: inferredSideworkWindow,
+        active: true,
+      });
+    });
+
+    return Array.from(templateMap.values());
+  }, [shiftTemplates, scheduleState, publishedSchedule]);
+
+  const activeShiftTemplates = useMemo(
+    () => availableShiftTemplates.filter((template) => template.active !== false),
+    [availableShiftTemplates]
+  );
+
   const userRole = currentUser?.role;
-  const isLeadership = userRole === "General Manager" || userRole === "Manager";
-  const canManageSchedule = Boolean(currentUser && isLeadership);
-  const canManageSidework = Boolean(currentUser && isLeadership);
-  const canManageApprovals = Boolean(currentUser && isLeadership);
-  const canManageStaff = Boolean(currentUser && isLeadership);
-  const canAccessCloudSync = currentUser?.role === "General Manager";
+  const userPermissions = useMemo(() => getStaffPermissions(currentUser), [currentUser]);
+  const isLeadership = userRole === "General Manager" || userRole === "Manager" || Boolean(userPermissions.schedule || userPermissions.sidework || userPermissions.approvals || userPermissions.staff);
+  const canManageSchedule = Boolean(currentUser && userPermissions.schedule);
+  const canManageSidework = Boolean(currentUser && userPermissions.sidework);
+  const canManageApprovals = Boolean(currentUser && userPermissions.approvals);
+  const canManageStaff = Boolean(currentUser && userPermissions.staff);
+  const canAccessCloudSync = Boolean(currentUser && userPermissions.cloudSync);
 
   const visibleScheduleSource = currentUser && !isLeadership ? publishedSchedule : scheduleState;
 
@@ -1431,9 +1511,9 @@ const [scheduleForm, setScheduleForm] = useState({
     setScheduleForm({
       id: null,
       dateLabel,
-      shift: shiftTemplates[0]?.name || "Open",
+      shift: activeShiftTemplates[0]?.name || "Open",
       employee: staffState.find((member) => member.active)?.name || "Jay",
-      sideworkWindow: shiftTemplates[0]?.sideworkWindow || "Open",
+      sideworkWindow: activeShiftTemplates[0]?.sideworkWindow || "Open",
     });
   }
 
@@ -1443,7 +1523,6 @@ const [scheduleForm, setScheduleForm] = useState({
       role: "Bartender",
       task: "",
       team: "Open Team",
-      assignedTo: "Bartender",
       shiftWindow: "Open",
       active: true,
     });
@@ -1453,7 +1532,7 @@ const [scheduleForm, setScheduleForm] = useState({
     const selectedDate = allScheduleDates.find((d) => d.dateLabel === scheduleForm.dateLabel);
     if (!selectedDate) return;
 
-    const selectedTemplate = shiftTemplates.find((t) => t.name === scheduleForm.shift);
+    const selectedTemplate = availableShiftTemplates.find((t) => t.name === scheduleForm.shift);
     const nextRow: ShiftRow = {
       id: scheduleForm.id ?? Date.now(),
       day: selectedDate.day,
@@ -1483,15 +1562,74 @@ const [scheduleForm, setScheduleForm] = useState({
     if (!cleanName || !cleanStart || !cleanEnd) return;
 
     const nextTemplate: ShiftTemplate = {
-      id: Date.now(),
+      id: shiftTemplateForm.id ?? Date.now(),
       name: cleanName,
       time: `${cleanStart} - ${cleanEnd}`,
       sideworkWindow: shiftTemplateForm.sideworkWindow,
+      active: true,
     };
 
-    setShiftTemplates((prev) => [...prev, nextTemplate]);
+    if (shiftTemplateForm.id) {
+      const oldTemplate = shiftTemplates.find((template) => template.id === shiftTemplateForm.id);
+      setShiftTemplates((prev) => prev.map((template) => (template.id === shiftTemplateForm.id ? nextTemplate : template)));
+
+      if (oldTemplate) {
+        setScheduleState((prev) =>
+          prev.map((shift) =>
+            shift.shift === oldTemplate.name
+              ? {
+                  ...shift,
+                  shift: nextTemplate.name,
+                  time: nextTemplate.time,
+                  sideworkWindow: nextTemplate.sideworkWindow,
+                }
+              : shift
+          )
+        );
+        setPublishedSchedule((prev) =>
+          prev.map((shift) =>
+            shift.shift === oldTemplate.name
+              ? {
+                  ...shift,
+                  shift: nextTemplate.name,
+                  time: nextTemplate.time,
+                  sideworkWindow: nextTemplate.sideworkWindow,
+                }
+              : shift
+          )
+        );
+      }
+    } else {
+      setShiftTemplates((prev) => [...prev, nextTemplate]);
+    }
+
     setScheduleForm((prev) => ({ ...prev, shift: nextTemplate.name, sideworkWindow: nextTemplate.sideworkWindow }));
-    setShiftTemplateForm({ name: "", startTime: "10:00 AM", endTime: "4:00 PM", sideworkWindow: "Open" });
+    setShiftTemplateForm({ id: null, name: "", startTime: "10:00 AM", endTime: "4:00 PM", sideworkWindow: "Open" });
+  }
+
+  function startEditShiftTemplate(template: ShiftTemplate) {
+    if (!canManageSchedule) return;
+    const parts = template.time.split("-").map((part) => part.trim());
+    setShiftTemplateForm({
+      id: template.id,
+      name: template.name,
+      startTime: parts[0] || "10:00 AM",
+      endTime: parts[1] || "4:00 PM",
+      sideworkWindow: template.sideworkWindow,
+    });
+  }
+
+  function cancelShiftTemplateEdit() {
+    setShiftTemplateForm({ id: null, name: "", startTime: "10:00 AM", endTime: "4:00 PM", sideworkWindow: "Open" });
+  }
+
+  function toggleShiftTemplateActive(id: number) {
+    if (!canManageSchedule) return;
+    setShiftTemplates((prev) =>
+      prev.map((template) =>
+        template.id === id ? { ...template, active: template.active === false } : template
+      )
+    );
   }
 
   function deleteShiftTemplate(id: number) {
@@ -1513,6 +1651,7 @@ const [scheduleForm, setScheduleForm] = useState({
     }
 
     setShiftTemplates((prev) => prev.filter((template) => template.id !== id));
+    if (shiftTemplateForm.id === id) cancelShiftTemplateEdit();
   }
 
   function addOrEditScheduleShift(e: React.FormEvent) {
@@ -1575,7 +1714,7 @@ Do you want to override this and add another shift anyway?`
 
   function startEditShift(row: ShiftRow) {
     if (!canManageSchedule) return;
-    const matchedTemplate = shiftTemplates.find((template) => template.name === row.shift);
+    const matchedTemplate = availableShiftTemplates.find((template) => template.name === row.shift);
     setScheduleForm({
       id: row.id,
       dateLabel: row.dateLabel,
@@ -1747,7 +1886,7 @@ Do you want to override this and add another shift anyway?`
                   ...item,
                   task: cleanTask,
                   team: sideworkForm.team,
-                  assignedTo: sideworkForm.assignedTo,
+                  assignedTo: sideworkForm.role,
                   shiftWindow: sideworkForm.shiftWindow,
                   active: sideworkForm.active,
                 }
@@ -1759,7 +1898,7 @@ Do you want to override this and add another shift anyway?`
               id: Date.now(),
               task: cleanTask,
               team: sideworkForm.team,
-              assignedTo: sideworkForm.assignedTo,
+              assignedTo: sideworkForm.role,
               shiftWindow: sideworkForm.shiftWindow,
               active: sideworkForm.active,
             },
@@ -1778,7 +1917,7 @@ Do you want to override this and add another shift anyway?`
       role,
       task: item.task,
       team: item.team,
-      assignedTo: item.assignedTo,
+
       shiftWindow: item.shiftWindow,
       active: item.active,
     });
@@ -2031,13 +2170,53 @@ Do you want to override this and add another shift anyway?`
     const cleanName = staffForm.name.trim();
     const cleanPin = staffForm.pin.trim();
     if (!cleanName || cleanPin.length !== 4) return;
-    setStaffState((prev) => [...prev, { id: Date.now(), name: cleanName, role: staffForm.role, pin: cleanPin, active: true }]);
+    setStaffState((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        name: cleanName,
+        role: staffForm.role,
+        pin: cleanPin,
+        active: true,
+        permissions: getDefaultPermissionsForRole(staffForm.role),
+      },
+    ]);
     setStaffForm({ name: "", role: "Bartender", pin: "" });
   }
 
   function updateStaffRole(id: number, role: Role) {
     if (!canManageStaff) return;
-    setStaffState((prev) => prev.map((member) => (member.id === id ? { ...member, role } : member)));
+    setStaffState((prev) =>
+      prev.map((member) =>
+        member.id === id
+          ? {
+              ...member,
+              role,
+              permissions: {
+                ...getDefaultPermissionsForRole(role),
+                ...(member.permissions || {}),
+              },
+            }
+          : member
+      )
+    );
+  }
+
+  function toggleStaffPermission(id: number, permission: keyof StaffPermissions) {
+    if (!canManageStaff) return;
+    setStaffState((prev) =>
+      prev.map((member) => {
+        if (member.id !== id) return member;
+        const currentPermissions = getStaffPermissions(member);
+        return {
+          ...member,
+          permissions: {
+            ...currentPermissions,
+            [permission]: !currentPermissions[permission],
+          },
+        };
+      })
+    );
   }
 
   function toggleStaffActive(id: number) {
@@ -2531,7 +2710,7 @@ Do you want to override this and add another shift anyway?`
 
         {activeView === "schedule" ? (
           <div className="grid gap-6 lg:grid-cols-[1fr_2fr]">
-            <AppCard title={canManageSchedule ? "Build Schedule" : "Published Schedule"}>
+            <AppCard title={canManageSchedule ? "Schedule Tools" : "Published Schedule"}>
               <div className="mb-4 flex flex-wrap gap-2">
                 <TabButton label="Previous Week" active={calendarWeek === "previous"} onClick={() => setCalendarWeek("previous")} />
                 <TabButton label="Current Week" active={calendarWeek === "current"} onClick={() => setCalendarWeek("current")} />
@@ -2540,14 +2719,24 @@ Do you want to override this and add another shift anyway?`
 
               {canManageSchedule ? (
                 <>
-                  <form onSubmit={addOrEditScheduleShift} className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowScheduleBuilder((prev) => !prev)}
+                    className="mb-3 flex w-full items-center justify-between rounded-2xl bg-stone-950 px-4 py-3 text-left text-sm font-black text-white"
+                  >
+                    <span>{showScheduleBuilder ? "Hide Build Schedule" : "Build / Add Shift"}</span>
+                    <span>{showScheduleBuilder ? "−" : "+"}</span>
+                  </button>
+
+                  {showScheduleBuilder ? (
+                    <form onSubmit={addOrEditScheduleShift} className="space-y-3">
                     <select value={scheduleForm.dateLabel} onChange={(e) => setScheduleForm((prev) => ({ ...prev, dateLabel: e.target.value }))} className="w-full rounded-2xl border border-stone-300 px-3 py-2">
                       {allScheduleDates.map((day) => <option key={`${day.day}-${day.dateLabel}`} value={day.dateLabel}>{day.day} · {day.dateLabel}</option>)}
                     </select>
                     <select
                       value={scheduleForm.shift}
                       onChange={(e) => {
-                        const selectedTemplate = shiftTemplates.find((template) => template.name === e.target.value);
+                        const selectedTemplate = availableShiftTemplates.find((template) => template.name === e.target.value);
                         setScheduleForm((prev) => ({
                           ...prev,
                           shift: e.target.value,
@@ -2556,7 +2745,7 @@ Do you want to override this and add another shift anyway?`
                       }}
                       className="w-full rounded-2xl border border-stone-300 px-3 py-2"
                     >
-                      {shiftTemplates.map((shift) => (
+                      {activeShiftTemplates.map((shift) => (
                         <option key={shift.id} value={shift.name}>{shift.name} · {shift.time} · {shift.sideworkWindow} Sidework</option>
                       ))}
                     </select>
@@ -2581,10 +2770,26 @@ Do you want to override this and add another shift anyway?`
                       <button type="button" onClick={autoScheduleVisibleWeek} className="rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white sm:col-span-2">Auto Schedule Visible Week</button>
                     </div>
                     {publishMeta.lastPublishedAt ? <p className="text-xs text-stone-500">Last published: {publishMeta.lastPublishedAt}</p> : null}
-                  </form>
+                    </form>
+                  ) : null}
 
-                  <div className="mt-5 rounded-3xl border border-stone-200 bg-stone-50 p-4">
+                  <button
+                    type="button"
+                    onClick={() => setShowShiftTemplates((prev) => !prev)}
+                    className="mt-3 flex w-full items-center justify-between rounded-2xl bg-stone-100 px-4 py-3 text-left text-sm font-black text-stone-900 ring-1 ring-stone-200"
+                  >
+                    <span>{showShiftTemplates ? "Hide Shift Templates" : "Manage Shift Templates"}</span>
+                    <span>{showShiftTemplates ? "−" : "+"}</span>
+                  </button>
+
+                  {showShiftTemplates ? (
+                    <div className="mt-3 rounded-3xl border border-stone-200 bg-stone-50 p-4">
                     <h3 className="mb-3 text-sm font-black text-stone-900">Shift Templates</h3>
+                    {shiftTemplateForm.id ? (
+                      <div className="mb-3 rounded-2xl bg-amber-50 p-3 text-sm font-semibold text-amber-900 ring-1 ring-amber-200">
+                        Editing shift template. Saving will update existing scheduled shifts using this template.
+                      </div>
+                    ) : null}
                     <form onSubmit={addShiftTemplate} className="space-y-2">
                       <input
                         value={shiftTemplateForm.name}
@@ -2615,35 +2820,80 @@ Do you want to override this and add another shift anyway?`
                         <option value="Mid">Assign Mid sidework</option>
                         <option value="Close">Assign Close sidework</option>
                       </select>
-                      <button type="submit" className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white">Create Shift Template</button>
+                      <button type="submit" className="w-full rounded-2xl bg-stone-900 px-4 py-2 text-sm font-bold text-white">
+                        {shiftTemplateForm.id ? "Save Shift Template" : "Create Shift Template"}
+                      </button>
+                      {shiftTemplateForm.id ? (
+                        <button
+                          type="button"
+                          onClick={cancelShiftTemplateEdit}
+                          className="w-full rounded-2xl bg-stone-200 px-4 py-2 text-sm font-bold text-stone-800"
+                        >
+                          Cancel Edit
+                        </button>
+                      ) : null}
                     </form>
                     <div className="mt-4 space-y-2">
                       {shiftTemplates.map((template) => {
                         const isDefaultTemplate = DEFAULT_SHIFT_TEMPLATES.some((item) => item.id === template.id);
+                        const isActive = template.active !== false;
                         return (
                           <SmallCard key={template.id}>
-                            <div className="flex items-center justify-between gap-2">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                               <div>
-                                <p className="font-bold">{template.name}</p>
-                                <p className="text-xs text-stone-500">{template.time} · {template.sideworkWindow} sidework</p>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="font-bold">{template.name}</p>
+                                  {isDefaultTemplate ? (
+                                    <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-bold text-stone-500">Default</span>
+                                  ) : null}
+                                  <span
+                                    className={`rounded-full px-3 py-1 text-xs font-bold ${
+                                      isActive ? "bg-green-100 text-green-700" : "bg-red-50 text-red-600"
+                                    }`}
+                                  >
+                                    {isActive ? "Visible" : "Hidden"}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-xs text-stone-500">{template.time} · {template.sideworkWindow} sidework</p>
+                                <p className="mt-1 text-xs text-stone-400">
+                                  {isActive ? "Shows in the schedule dropdown." : "Hidden from the schedule dropdown."}
+                                </p>
                               </div>
-                              {!isDefaultTemplate ? (
+
+                              <div className="flex flex-wrap gap-1">
                                 <button
                                   type="button"
-                                  onClick={() => deleteShiftTemplate(template.id)}
-                                  className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600"
+                                  onClick={() => startEditShiftTemplate(template)}
+                                  className="rounded-full bg-stone-900 px-3 py-1 text-xs font-bold text-white"
                                 >
-                                  Delete
+                                  Edit
                                 </button>
-                              ) : (
-                                <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-bold text-stone-500">Default</span>
-                              )}
+                                <button
+                                  type="button"
+                                  onClick={() => toggleShiftTemplateActive(template.id)}
+                                  className={`rounded-full px-3 py-1 text-xs font-bold ${
+                                    isActive ? "bg-stone-200 text-stone-700" : "bg-green-100 text-green-700"
+                                  }`}
+                                >
+                                  {isActive ? "Hide" : "Show"}
+                                </button>
+                                {!isDefaultTemplate ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => deleteShiftTemplate(template.id)}
+                                    className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600"
+                                  >
+                                    Delete
+                                  </button>
+                                ) : null}
+                              </div>
                             </div>
                           </SmallCard>
                         );
                       })}
                     </div>
-                  </div>
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <div className="space-y-3">
@@ -2662,7 +2912,7 @@ Do you want to override this and add another shift anyway?`
                   return (
                     <div key={`${day.day}-${day.dateLabel}`} className="rounded-3xl border border-stone-200 bg-stone-50/80 p-4">
                       <div className="mb-3 flex items-center justify-between gap-3">
-                        <div><p className="font-black text-stone-900">{day.day}</p><p className="text-sm text-stone-500">{day.dateLabel}</p></div>
+                        <div><p className="font-black text-stone-900">{day.day}</p><p className="text-sm text-stone-500">{day.dateLabel} · {dayShifts.length} shift{dayShifts.length === 1 ? "" : "s"}</p></div>
                         {canManageSchedule ? <button type="button" onClick={() => clearDay(day)} className="rounded-full bg-white px-3 py-1 text-xs font-bold text-red-600 ring-1 ring-red-100">Clear Day</button> : null}
                       </div>
                       {dayShifts.length ? (
@@ -2769,7 +3019,7 @@ Do you want to override this and add another shift anyway?`
                       <select value={sideworkForm.role} onChange={(e) => setSideworkForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="w-full rounded-2xl border px-3 py-2">{ROLES.map((role) => <option key={role} value={role}>{role}</option>)}</select>
                       <input value={sideworkForm.task} onChange={(e) => setSideworkForm((prev) => ({ ...prev, task: e.target.value }))} placeholder="Task" className="w-full rounded-2xl border px-3 py-2" />
                       <select value={sideworkForm.team} onChange={(e) => setSideworkForm((prev) => ({ ...prev, team: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{TEAM_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
-                      <select value={sideworkForm.assignedTo} onChange={(e) => setSideworkForm((prev) => ({ ...prev, assignedTo: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{SIDEWORK_ASSIGN_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
+                      
                       <select value={sideworkForm.shiftWindow} onChange={(e) => setSideworkForm((prev) => ({ ...prev, shiftWindow: e.target.value }))} className="w-full rounded-2xl border px-3 py-2">{SIDEWORK_SHIFT_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select>
                       <button type="submit" className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-sm font-bold text-white">{sideworkForm.id ? "Update Task" : "Add Task"}</button>
                     </form>
@@ -2856,7 +3106,34 @@ Do you want to override this and add another shift anyway?`
         ) : null}
 
         {activeView === "staff" && canManageStaff ? (
-          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]"><AppCard title="Add Staff"><form onSubmit={addStaffMember} className="space-y-3"><input value={staffForm.name} onChange={(e) => setStaffForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Name" className="w-full rounded-2xl border px-3 py-2" /><select value={staffForm.role} onChange={(e) => setStaffForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="w-full rounded-2xl border px-3 py-2">{ROLES.map((role) => <option key={role}>{role}</option>)}</select><input value={staffForm.pin} onChange={(e) => setStaffForm((prev) => ({ ...prev, pin: digitsOnly(e.target.value).slice(0, 4) }))} placeholder="4-digit PIN" className="w-full rounded-2xl border px-3 py-2" /><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-white">Add Staff</button></form></AppCard><AppCard title="Staff List"><div className="space-y-2">{staffState.map((member) => <SmallCard key={member.id}><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">{member.name}</p><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getRoleBadgeClass(member.role)}`}>{member.role}</span><p className="mt-1 text-xs text-stone-500">PIN: {member.pin} · {member.active ? "Active" : "Inactive"}</p></div><select value={member.role} onChange={(e) => updateStaffRole(member.id, e.target.value as Role)} className="rounded-2xl border px-3 py-2 text-sm">{ROLES.map((role) => <option key={role}>{role}</option>)}</select></div><div className="mt-2 flex gap-2"><button onClick={() => toggleStaffActive(member.id)} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-stone-900">{member.active ? "Deactivate" : "Activate"}</button><button onClick={() => removeStaffMember(member.id)} className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600">Remove</button></div></SmallCard>)}</div></AppCard></div>
+          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]"><AppCard title="Add Staff"><form onSubmit={addStaffMember} className="space-y-3"><input value={staffForm.name} onChange={(e) => setStaffForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Name" className="w-full rounded-2xl border px-3 py-2" /><select value={staffForm.role} onChange={(e) => setStaffForm((prev) => ({ ...prev, role: e.target.value as Role }))} className="w-full rounded-2xl border px-3 py-2">{ROLES.map((role) => <option key={role}>{role}</option>)}</select><input value={staffForm.pin} onChange={(e) => setStaffForm((prev) => ({ ...prev, pin: digitsOnly(e.target.value).slice(0, 4) }))} placeholder="4-digit PIN" className="w-full rounded-2xl border px-3 py-2" /><button className="w-full rounded-2xl bg-stone-950 px-4 py-2 text-white">Add Staff</button></form></AppCard><AppCard title="Staff List"><div className="space-y-2">{staffState.map((member) => <SmallCard key={member.id}><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">{member.name}</p><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ${getRoleBadgeClass(member.role)}`}>{member.role}</span><p className="mt-1 text-xs text-stone-500">PIN: {member.pin} · {member.active ? "Active" : "Inactive"}</p></div><select value={member.role} onChange={(e) => updateStaffRole(member.id, e.target.value as Role)} className="rounded-2xl border px-3 py-2 text-sm">{ROLES.map((role) => <option key={role}>{role}</option>)}</select></div><div className="mt-3 grid gap-2 sm:grid-cols-2">
+  {([
+    ["schedule", "Schedule"],
+    ["sidework", "Sidework"],
+    ["approvals", "Approvals"],
+    ["staff", "Staff Admin"],
+    ["cloudSync", "Cloud Sync"],
+  ] as Array<[keyof StaffPermissions, string]>).map(([permissionKey, label]) => {
+    const permissions = getStaffPermissions(member);
+    const isEnabled = permissions[permissionKey];
+    return (
+      <button
+        key={permissionKey}
+        type="button"
+        onClick={() => toggleStaffPermission(member.id, permissionKey)}
+        className={`rounded-2xl px-3 py-2 text-xs font-bold ring-1 ${
+          isEnabled
+            ? "bg-green-100 text-green-800 ring-green-200"
+            : "bg-stone-100 text-stone-500 ring-stone-200"
+        }`}
+      >
+        {label}: {isEnabled ? "On" : "Off"}
+      </button>
+    );
+  })}
+</div>
+<p className="mt-2 text-xs text-stone-400">Permissions are per person, so one Lead can have schedule access without giving all Leads access.</p>
+<div className="mt-2 flex gap-2"><button onClick={() => toggleStaffActive(member.id)} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-stone-900">{member.active ? "Deactivate" : "Activate"}</button><button onClick={() => removeStaffMember(member.id)} className="rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-600">Remove</button></div></SmallCard>)}</div></AppCard></div>
         ) : null}
       </div>
     </div>
