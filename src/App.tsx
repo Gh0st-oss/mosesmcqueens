@@ -955,6 +955,7 @@ const [scheduleForm, setScheduleForm] = useState({
   const [showShiftSelector, setShowShiftSelector] = useState(false);
   const [showScheduleBuilder, setShowScheduleBuilder] = useState(true);
   const [showShiftTemplates, setShowShiftTemplates] = useState(false);
+  const [staffScheduleMode, setStaffScheduleMode] = useState<"mine" | "team">("mine");
   const [missedTaskDraft, setMissedTaskDraft] = useState<MissedTaskDraft>({ itemId: null, note: "" });
 
   useEffect(() => {
@@ -1381,24 +1382,47 @@ const [scheduleForm, setScheduleForm] = useState({
   );
 
   const myPublishedThisWeek = useMemo(
-    () =>
-      currentUser && !isLeadership
-        ? publishedSchedule.filter(
-            (shift) =>
-              shift.employee === currentUser.name &&
-              visibleScheduleDays.some((day) => day.day === shift.day && day.dateLabel === shift.dateLabel)
-          )
-        : [],
+    () => {
+      if (!currentUser || isLeadership) return [];
+      const dayOrder = visibleScheduleDays.map((day) => `${day.day}-${day.dateLabel}`);
+      return publishedSchedule
+        .filter(
+          (shift) =>
+            shift.employee === currentUser.name &&
+            visibleScheduleDays.some((day) => day.day === shift.day && day.dateLabel === shift.dateLabel)
+        )
+        .sort((a, b) => {
+          const aIndex = dayOrder.indexOf(`${a.day}-${a.dateLabel}`);
+          const bIndex = dayOrder.indexOf(`${b.day}-${b.dateLabel}`);
+          if (aIndex !== bIndex) return aIndex - bIndex;
+          return a.time.localeCompare(b.time);
+        });
+    },
     [currentUser, isLeadership, publishedSchedule, visibleScheduleDays]
   );
 
   const publishedThisWeek = useMemo(
-    () =>
-      publishedSchedule.filter((row) =>
-        visibleScheduleDays.some((day) => day.day === row.day && day.dateLabel === row.dateLabel)
-      ),
+    () => {
+      const dayOrder = visibleScheduleDays.map((day) => `${day.day}-${day.dateLabel}`);
+      return publishedSchedule
+        .filter((row) =>
+          visibleScheduleDays.some((day) => day.day === row.day && day.dateLabel === row.dateLabel)
+        )
+        .sort((a, b) => {
+          const aIndex = dayOrder.indexOf(`${a.day}-${a.dateLabel}`);
+          const bIndex = dayOrder.indexOf(`${b.day}-${b.dateLabel}`);
+          if (aIndex !== bIndex) return aIndex - bIndex;
+          return a.time.localeCompare(b.time);
+        });
+    },
     [publishedSchedule, visibleScheduleDays]
   );
+
+  const staffVisibleScheduleSource = useMemo(() => {
+    if (!currentUser || isLeadership) return visibleScheduleSource;
+    if (staffScheduleMode === "team") return visibleScheduleSource;
+    return visibleScheduleSource.filter((shift) => shift.employee === currentUser.name);
+  }, [currentUser, isLeadership, staffScheduleMode, visibleScheduleSource]);
 
   const scheduleAlerts = useMemo<Record<number, ScheduleAlert>>(() => {
     const alerts: Record<number, ScheduleAlert> = {};
@@ -2897,10 +2921,34 @@ Do you want to override this and add another shift anyway?`
                 </>
               ) : (
                 <div className="space-y-3">
-                  <p className="text-sm text-stone-600">Staff can now view previous, current, and next week from the published schedule.</p>
-                  {myPublishedThisWeek.length ? myPublishedThisWeek.map((shift) => (
-                    <SmallCard key={`mine-${shift.id}`}><p className="font-bold">{shift.day}, {shift.dateLabel}</p><p className="text-sm text-stone-500">{shift.shift} · {shift.time}</p></SmallCard>
-                  )) : <EmptyState text="No personal published shifts for this selected week." />}
+                  <p className="text-sm text-stone-600">Choose whether you want to see only your shifts or the full team schedule.</p>
+                  <div className="flex rounded-2xl bg-stone-100 p-1 ring-1 ring-stone-200">
+                    <button
+                      type="button"
+                      onClick={() => setStaffScheduleMode("mine")}
+                      className={`flex-1 rounded-xl px-3 py-2 text-sm font-bold ${
+                        staffScheduleMode === "mine" ? "bg-stone-950 text-white" : "text-stone-600"
+                      }`}
+                    >
+                      My Shifts
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStaffScheduleMode("team")}
+                      className={`flex-1 rounded-xl px-3 py-2 text-sm font-bold ${
+                        staffScheduleMode === "team" ? "bg-stone-950 text-white" : "text-stone-600"
+                      }`}
+                    >
+                      Team Schedule
+                    </button>
+                  </div>
+                  {staffScheduleMode === "mine" ? (
+                    myPublishedThisWeek.length ? myPublishedThisWeek.map((shift) => (
+                      <SmallCard key={`mine-${shift.id}`}><p className="font-bold">{shift.day}, {shift.dateLabel}</p><p className="text-sm text-stone-500">{shift.shift} · {shift.time}</p></SmallCard>
+                    )) : <EmptyState text="No personal published shifts for this selected week." />
+                  ) : (
+                    <p className="rounded-2xl bg-stone-50 p-3 text-sm text-stone-500 ring-1 ring-stone-200">Team schedule is shown below by day.</p>
+                  )}
                 </div>
               )}
             </AppCard>
@@ -2908,7 +2956,8 @@ Do you want to override this and add another shift anyway?`
             <AppCard title={isLeadership ? "Manager Schedule View" : "My Team Schedule"}>
               <div className="space-y-4">
                 {visibleScheduleDays.map((day) => {
-                  const dayShifts = visibleScheduleSource.filter((row) => row.day === day.day && row.dateLabel === day.dateLabel);
+                  const scheduleRowsForView = isLeadership ? visibleScheduleSource : staffVisibleScheduleSource;
+                  const dayShifts = scheduleRowsForView.filter((row) => row.day === day.day && row.dateLabel === day.dateLabel);
                   return (
                     <div key={`${day.day}-${day.dateLabel}`} className="rounded-3xl border border-stone-200 bg-stone-50/80 p-4">
                       <div className="mb-3 flex items-center justify-between gap-3">
